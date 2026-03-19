@@ -1,0 +1,472 @@
+/**
+ * main.cpp — Multi-screen demo (Light + Joystick + Microphone + Accelerometer)
+ *
+ * Hardware:
+ *  - EK-TM4C1294XL LaunchPad
+ *  - BoosterPack MKII (OPT3001, Joystick, Mic, Accelerometer)
+ *  - LCD Crystalfontz128x128 (SPI0)
+ *  - Buttons S1 (PA7), S2 (PA6)
+ *
+ * Author: Edwin A. Rodríguez, 2025
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/fpu.h"
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/pin_map.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "OPT3001.h"
+#include "timerLib.h"
+#include "driverlib/pwm.h"
+#include "driverlib/pin_map.h"
+
+}
+
+#include "button.h"
+#include "joystick.h"
+#include "elapsedTime.h"
+
+// ============================================================================
+// Globals
+// ============================================================================
+tContext gContext;
+uint32_t gSysClk;
+Timer timer;
+
+Button btnLeft(S1, 2, 50, 25, ButtonPull::PullUp);
+Button btnRight(S2, 2, 50, 25, ButtonPull::PullUp);
+Joystick js(JSX, JSY, JS1);
+
+elapsedMillis luxTimer(timer);
+elapsedMillis drawTimer(timer);
+elapsedMillis inputTimer(timer);
+
+float luxValue = 0.0f;
+
+// Screen management
+enum ScreenID { SCREEN_LUX = 0, SCREEN_JOYSTICK, SCREEN_MIC, SCREEN_ACCEL, SCREEN_COUNT };
+uint8_t currentScreen = SCREEN_LUX;
+
+// ============================================================================
+// ADC for microphone (PE5 → AIN8) and accelerometer (PE0–PE2 → AIN3–AIN1)
+// ============================================================================
+#define MIC_ADC_BASE      ADC0_BASE
+#define MIC_ADC_SEQ       3
+#define MIC_ADC_CHANNEL   ADC_CTL_CH8  // PE5 -> AIN8
+
+#define ACC_ADC_SEQ       2
+#define ACC_CH_X          ADC_CTL_CH3  // PE0
+#define ACC_CH_Y          ADC_CTL_CH2  // PE1
+#define ACC_CH_Z          ADC_CTL_CH1  // PE2
+
+// ============================================================================
+// Buzzer (PF1) using PWM0 Generator 0 Output 1
+// ============================================================================
+#define BUZZER_PWM_BASE    PWM0_BASE
+#define BUZZER_GEN         PWM_GEN_0
+#define BUZZER_OUTNUM      PWM_OUT_1
+#define BUZZER_OUTBIT      PWM_OUT_1_BIT
+
+void Buzzer_Init(void)
+{
+    // Enable peripherals
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0));
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));
+
+    // PF1 -> M0PWM1
+    GPIOPinConfigure(GPIO_PF1_M0PWM1);
+    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_1);
+
+    // Use system clock for PWM
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_64); // 120 MHz / 64 = 1.875 MHz PWM clock
+}
+
+
+// ============================================================================
+// Play tone on PF1 using PWM
+// ============================================================================
+void Buzzer_Beep(uint32_t freq_hz, uint32_t duration_ms)
+{
+    if (freq_hz == 0) return;
+
+    // Compute PWM period in clock ticks
+    uint32_t pwmClock = gSysClk / 64; // from divider in Buzzer_Init()
+    uint32_t period = pwmClock / freq_hz;
+
+    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_GEN,
+                    PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+
+    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_GEN, period);
+    PWMPulseWidthSet(BUZZER_PWM_BASE, BUZZER_OUTNUM, period / 2); // 50 % duty
+
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, true);
+    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_GEN);
+
+    // Short delay for duration
+    SysCtlDelay((gSysClk / 3 / 1000) * duration_ms);
+
+    // Turn off
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, false);
+}
+
+
+// ---------------------------------------------------------------------------
+// ADC Init
+// ---------------------------------------------------------------------------
+void ADC_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_5);
+
+    // Mic (SEQ3)
+    ADCSequenceConfigure(ADC0_BASE, MIC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, MIC_ADC_SEQ, 0, MIC_ADC_CHANNEL | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, MIC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, MIC_ADC_SEQ);
+
+    // Accelerometer (SEQ2)
+    ADCSequenceConfigure(ADC0_BASE, ACC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 0, ACC_CH_X);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 1, ACC_CH_Y);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 2, ACC_CH_Z | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, ACC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, ACC_ADC_SEQ);
+}
+
+// ---------------------------------------------------------------------------
+// Mic Read (SEQ3)
+// ---------------------------------------------------------------------------
+uint16_t Mic_Read(void)
+{
+    uint32_t value;
+    ADCProcessorTrigger(MIC_ADC_BASE, MIC_ADC_SEQ);
+    while (!ADCIntStatus(MIC_ADC_BASE, MIC_ADC_SEQ, false));
+    ADCIntClear(MIC_ADC_BASE, MIC_ADC_SEQ);
+    ADCSequenceDataGet(MIC_ADC_BASE, MIC_ADC_SEQ, &value);
+    return (uint16_t)value;
+}
+
+// ---------------------------------------------------------------------------
+// Accelerometer read (SEQ2) → returns normalized X/Y/Z (-1.0 to +1.0)
+// ---------------------------------------------------------------------------
+void Accel_Read(float *x, float *y, float *z)
+{
+    uint32_t raw[3];
+    ADCProcessorTrigger(ADC0_BASE, ACC_ADC_SEQ);
+    while (!ADCIntStatus(ADC0_BASE, ACC_ADC_SEQ, false));
+    ADCIntClear(ADC0_BASE, ACC_ADC_SEQ);
+    ADCSequenceDataGet(ADC0_BASE, ACC_ADC_SEQ, raw);
+
+    // Convert 0–4095 → -1.0 to +1.0 (assuming center ≈ 2048)
+    *x = ((float)raw[0] - 2048.0f) / 2048.0f;
+    *y = ((float)raw[1] - 2048.0f) / 2048.0f;
+    *z = ((float)raw[2] - 2048.0f) / 2048.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Compute averaged logarithmic RMS level (mic)
+// ---------------------------------------------------------------------------
+float Mic_Level(void)
+{
+    const int N = 128;
+    float sum = 0.0f;
+    for (int i = 0; i < N; i++)
+    {
+        uint16_t s = Mic_Read();
+        float v = (float)s / 4095.0f;
+        float ac = v - 0.5f;
+        sum += ac * ac;
+    }
+    float rms = sqrtf(sum / N);
+    if (rms < 0.0001f) rms = 0.0001f;
+
+    float db = 20.0f * log10f(rms / 0.25f);
+    if (db < -60.0f) db = -60.0f;
+    if (db > 0.0f) db = 0.0f;
+
+    float level = (db + 60.0f) / 60.0f;
+    return level;
+}
+
+// ============================================================================
+// LCD
+// ============================================================================
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0));
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);
+}
+
+// ============================================================================
+// Header bar with arrows and title (flechas activas con S1/S2)
+// ============================================================================
+void DrawHeader(const char *title, bool leftActive, bool rightActive)
+{
+    // Barra superior
+    tRectangle header = {0, 0, 127, 20};
+    GrContextForegroundSet(&gContext, ClrDarkBlue);
+    GrRectFill(&gContext, &header);
+
+    // Flecha izquierda (◀)
+    GrContextForegroundSet(&gContext, leftActive ? ClrYellow : ClrGray);
+    // Usa "<" para compatibilidad con la font Fixed6x8
+    GrStringDraw(&gContext, "<", -1, 4, 6, false);
+
+    // Flecha derecha (▶)
+    GrContextForegroundSet(&gContext, rightActive ? ClrYellow : ClrGray);
+    GrStringDraw(&gContext, ">", -1, 118, 6, false);
+
+    // Título centrado
+    GrContextForegroundSet(&gContext, ClrWhite);
+    GrStringDrawCentered(&gContext, title, -1, 64, 7, false);
+}
+
+// ============================================================================
+// Screen 1: Light
+// ============================================================================
+void Draw_Lux(float lux)
+{
+    const float LUX_MAX = 1000.0f;
+    int barWidth = (int)((lux / LUX_MAX) * 100);
+    if (barWidth > 100) barWidth = 100;
+
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Ambient Light", btnLeft.isPressed(), btnRight.isPressed());
+
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f lx", lux);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 50, false);
+
+    tRectangle fill = {14, 80, 14 + barWidth, 95};
+    GrContextForegroundSet(&gContext, ClrGreen);
+    GrRectFill(&gContext, &fill);
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Screen 2: Joystick
+// ============================================================================
+void Draw_Joystick(float x, float y)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Joystick", btnLeft.isPressed(), btnRight.isPressed());
+
+
+    int cx = 64, cy = 75, radius = 40;
+    GrContextForegroundSet(&gContext, ClrWhite);
+    GrCircleDraw(&gContext, cx, cy, radius);
+
+    int px = cx + (int)(x * radius);
+    int py = cy - (int)(y * radius);
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrCircleFill(&gContext, px, py, 3);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "X=%.2f Y=%.2f", x, y);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Screen 3: Microphone (log VU meter)
+// ============================================================================
+void Draw_Mic(float level)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Microphone", btnLeft.isPressed(), btnRight.isPressed());
+
+
+    const int barX1 = 55, barX2 = 73, barY1 = 25, barY2 = 120;
+    const int barHeight = barY2 - barY1;
+
+    tRectangle outline = {barX1 - 2, barY1 - 2, barX2 + 2, barY2 + 2};
+    GrContextForegroundSet(&gContext, ClrGray);
+    GrRectDraw(&gContext, &outline);
+
+    if (level < 0) level = 0; if (level > 1) level = 1;
+    int filled = (int)(level * barHeight);
+    int yStart = barY2 - filled;
+
+    for (int y = barY2; y > yStart; y--)
+    {
+        float f = (float)(barY2 - y) / barHeight;
+        uint32_t c = (f < 0.6f ? ClrGreen : f < 0.85f ? ClrYellow : ClrRed);
+        GrContextForegroundSet(&gContext, c);
+        GrLineDrawH(&gContext, barX1, barX2, y);
+    }
+
+    char buf[32];
+    float dbVal = (level * 60.0f) - 60.0f;
+    snprintf(buf, sizeof(buf), "%.1f dB", dbVal);
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Screen 4: Accelerometer Particle Simulation
+// ============================================================================
+#define NUM_PARTICLES 40
+struct Particle {
+    float x, y;
+    float vx, vy;
+};
+
+Particle p[NUM_PARTICLES];
+
+void Particles_Init(void)
+{
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        p[i].x = rand() % 128;
+        p[i].y = 30 + rand() % 90;
+        p[i].vx = 0;
+        p[i].vy = 0;
+    }
+}
+
+void Draw_Accelerometer(float ax, float ay)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Accelerometer", btnLeft.isPressed(), btnRight.isPressed());
+
+
+    // Gravity effect
+    float gx = ax * 0.9f;
+    float gy = -ay * 0.9f;
+
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        // Update physics
+        p[i].vx += gx;
+        p[i].vy += gy;
+        p[i].x += p[i].vx;
+        p[i].y += p[i].vy;
+
+        // Bounce on borders
+        if (p[i].x < 0) { p[i].x = 0; p[i].vx *= -0.7f; }
+        if (p[i].x > 127) { p[i].x = 127; p[i].vx *= -0.7f; }
+        if (p[i].y < 25) { p[i].y = 25; p[i].vy *= -0.7f; }
+        if (p[i].y > 125) { p[i].y = 125; p[i].vy *= -0.7f; }
+
+        // Draw particle
+        GrContextForegroundSet(&gContext, ClrCyan);
+        GrCircleFill(&gContext, (int)p[i].x, (int)p[i].y, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "AX=%.2f AY=%.2f", ax, ay);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Button click callbacks with buzzer feedback
+// ============================================================================
+
+void OnLeftClick()
+{
+    // Short low beep (1.0 kHz, 40 ms)
+    Buzzer_Beep(200, 40);
+
+    // Move to previous screen
+    if (currentScreen > 0)
+        currentScreen--;
+    else
+        currentScreen = SCREEN_COUNT - 1;
+}
+
+void OnRightClick()
+{
+    // Short high beep (1.6 kHz, 40 ms)
+    Buzzer_Beep(300, 40);
+
+    // Move to next screen
+    currentScreen = (currentScreen + 1) % SCREEN_COUNT;
+}
+
+
+// ============================================================================
+// Main
+// ============================================================================
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                                  SYSCTL_USE_PLL | SYSCTL_CFG_VCO_240), 120000000);
+
+    LCD_Init();
+    timer.begin(gSysClk, TIMER0_BASE);
+    btnLeft.begin(); btnRight.begin();
+    btnLeft.doubleClick(&OnLeftClick);
+    btnRight.doubleClick(&OnRightClick);
+    js.begin(); js.calibrateCenter(32);
+    ADC_Init(); OPT3001_Init();
+    Particles_Init();
+    Buzzer_Init();
+
+
+    float micLevel = 0, ax = 0, ay = 0, az = 0;
+
+    while (1)
+    {
+        if (inputTimer >= 10) {
+            btnLeft.tick(); btnRight.tick(); js.tick();
+            inputTimer = 0;
+        }
+
+        if (luxTimer >= 1000) {
+            luxValue = OPT3001_ReadLux();
+            luxTimer = 0;
+        }
+
+        if (drawTimer >= 50) {
+            if (currentScreen == SCREEN_LUX)
+                Draw_Lux(luxValue);
+            else if (currentScreen == SCREEN_JOYSTICK)
+                Draw_Joystick(js.x(), js.y());
+            else if (currentScreen == SCREEN_MIC) {
+                micLevel = Mic_Level();
+                Draw_Mic(micLevel);
+            } else {
+                Accel_Read(&ax, &ay, &az);
+                Draw_Accelerometer(ax, ay);
+            }
+            drawTimer = 0;
+        }
+    }
+}

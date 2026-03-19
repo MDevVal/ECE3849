@@ -1,0 +1,36 @@
+#ifndef OPT3001_H_
+#define OPT3001_H_
+
+#include <stdint.h>
+#include <stdbool.h>
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/i2c.h"
+
+// Dirección I2C
+#define OPT3001_ADDR 0x44
+
+#define OPT3001_RESULT_REG   0x00
+#define OPT3001_CONFIG_REG   0x01
+#define OPT3001_MANUF_REG    0x7E
+#define OPT3001_DEVICEID_REG 0x7F
+#define OPT3001_DEFAULT_CONFIG 0b1100010000010000
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void OPT3001_Init(uint32_t sysClk);
+void OPT3001_WriteReg(uint8_t reg, uint16_t data);
+uint16_t OPT3001_ReadReg(uint8_t reg);
+uint32_t OPT3001_ReadLux(void);
+uint16_t OPT3001_ReadManufacturerID(void);
+uint16_t OPT3001_ReadDeviceID(void);
+uint16_t OPT3001_ReadConfig(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

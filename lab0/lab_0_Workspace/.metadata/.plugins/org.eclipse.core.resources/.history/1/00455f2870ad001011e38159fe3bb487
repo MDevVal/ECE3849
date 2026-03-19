@@ -1,0 +1,210 @@
+#include "GUI_Button.h"
+
+// ==========================================================
+// Constructor
+// ==========================================================
+GUI_Button::GUI_Button(int x, int y, int w, int h, const char* label)
+    : GUI_Widget(x, y, w, h),
+      _label(label),
+      _pressed(false),
+      _onClick(nullptr),
+      _onRelease(nullptr),
+      _linkedButton(nullptr)
+{
+    applyTheme(GUI_Theme::Light);
+}
+
+// ==========================================================
+// Temas predefinidos
+// ==========================================================
+void GUI_Button::applyTheme(GUI_Theme theme)
+{
+    switch (theme) {
+    case GUI_Theme::Light:
+        _colorNormal   = 0x00E0E0E0;
+        _colorPressed  = 0x00909090;
+        _colorFocused  = 0x00FFFACD;
+        _borderFocused = 0x000080FF;
+        _textColor     = ClrBlack;
+        break;
+
+    case GUI_Theme::Dark:
+        _colorNormal   = 0x00282828;
+        _colorPressed  = 0x00404040;
+        _colorFocused  = 0x00406090;
+        _borderFocused = 0x00A0D0FF;
+        _textColor     = ClrWhite;
+        break;
+
+    case GUI_Theme::Blue:
+        _colorNormal   = 0x0070A0FF;
+        _colorPressed  = 0x003050C0;
+        _colorFocused  = 0x0090C8FF;
+        _borderFocused = 0x00FFFFFF;
+        _textColor     = ClrWhite;
+        break;
+
+    case GUI_Theme::Green:
+        _colorNormal   = 0x0090EE90;
+        _colorPressed  = 0x0050A050;
+        _colorFocused  = 0x00C0FFC0;
+        _borderFocused = 0x00008000;
+        _textColor     = ClrBlack;
+        break;
+
+    case GUI_Theme::Red:
+        _colorNormal   = 0x00FF6666;
+        _colorPressed  = 0x00900000;
+        _colorFocused  = 0x00FFA0A0;
+        _borderFocused = 0x00FF0000;
+        _textColor     = ClrWhite;
+        break;
+
+    case GUI_Theme::Orange:
+        _colorNormal   = 0x00FFB347;
+        _colorPressed  = 0x00D2691E;
+        _colorFocused  = 0x00FFD580;
+        _borderFocused = 0x00FF8800;
+        _textColor     = ClrBlack;
+        break;
+
+    case GUI_Theme::Custom:
+        break;
+    }
+}
+
+// ==========================================================
+// Configuración
+// ==========================================================
+void GUI_Button::setTheme(GUI_Theme theme) { applyTheme(theme); }
+
+void GUI_Button::setColors(uint32_t normal, uint32_t pressed, uint32_t text)
+{
+    _colorNormal = normal;
+    _colorPressed = pressed;
+    if (text != 0) _textColor = text;
+}
+
+void GUI_Button::setCustomTheme(uint32_t normal, uint32_t pressed,
+                                uint32_t text, uint32_t focused, uint32_t borderFocused)
+{
+    _colorNormal = normal;
+    _colorPressed = pressed;
+    _textColor = text;
+    _colorFocused = focused;
+    _borderFocused = borderFocused;
+}
+
+void GUI_Button::setCustomTheme(const GUI_CustomTheme& theme)
+{
+    _colorNormal = theme.colorNormal;
+    _colorPressed = theme.colorPressed;
+    _textColor = theme.textColor;
+    _colorFocused = theme.colorFocused;
+    _borderFocused = theme.borderFocused;
+}
+
+void GUI_Button::setLabel(const char* text) { _label = text; }
+void GUI_Button::setPressed(bool p) { _pressed = p; }
+bool GUI_Button::isPressed() const { return _pressed; }
+void GUI_Button::setOnClick(callbackFunction fn) { _onClick = fn; }
+void GUI_Button::setOnRelease(callbackReleaseFunction fn) { _onRelease = fn; }
+
+void GUI_Button::attachButton(Button* physicalButton)
+{
+    _linkedButton = physicalButton;
+}
+
+// ==========================================================
+// Interacción programática
+// ==========================================================
+void GUI_Button::press() { _pressed = true; }
+
+void GUI_Button::release()
+{
+    if (_pressed) {
+        _pressed = false;
+        if (_onClick) _onClick();
+        if (_onRelease) _onRelease();
+    }
+}
+
+void GUI_Button::click()
+{
+    press();
+    release();
+}
+
+void GUI_Button::handleInput(bool selectPressed)
+{
+    if (isFocused() && selectPressed) {
+        click();
+    }
+}
+
+// ==========================================================
+// Dibujo
+// ==========================================================
+void GUI_Button::draw(tContext* ctx)
+{
+    if (!isVisible()) return;
+    updateFromButton();
+
+    uint32_t fill = _colorNormal;
+    if (_pressed)
+        fill = _colorPressed;
+    else if (isFocused())
+        fill = _colorFocused;
+
+    tRectangle rect = {
+        getX(), getY(),
+        getX() + getWidth() - 1,
+        getY() + getHeight() - 1
+    };
+
+    // Fondo
+    GrContextForegroundSet(ctx, fill);
+    GrRectFill(ctx, &rect);
+
+    // Bordes
+    if (isFocused()) {
+        GrContextForegroundSet(ctx, _borderFocused);
+        GrRectDraw(ctx, &rect);
+
+        tRectangle inner1 = { getX()+1, getY()+1, getX()+getWidth()-2, getY()+getHeight()-2 };
+        GrContextForegroundSet(ctx, 0x00FFFFFF);
+        GrRectDraw(ctx, &inner1);
+
+        tRectangle inner2 = { getX()+2, getY()+2, getX()+getWidth()-3, getY()+getHeight()-3 };
+        GrContextForegroundSet(ctx, _borderFocused);
+        GrRectDraw(ctx, &inner2);
+    } else {
+        GrContextForegroundSet(ctx, ClrBlack);
+        GrRectDraw(ctx, &rect);
+    }
+
+    // Texto
+    if (_label) {
+        int centerX = getX() + getWidth() / 2;
+        int centerY = getY() + getHeight() / 2;
+        GrContextForegroundSet(ctx, _textColor);
+        GrStringDrawCentered(ctx, _label, -1, centerX, centerY, false);
+    }
+}
+
+// ==========================================================
+// Sincronización con botón físico
+// ==========================================================
+void GUI_Button::updateFromButton()
+{
+    if (!_linkedButton) return;
+
+    if (_linkedButton->wasPressed()) {
+        _pressed = true;
+        if (_onClick) _onClick();
+    }
+    if (_linkedButton->wasReleased()) {
+        _pressed = false;
+        if (_onRelease) _onRelease();
+    }
+}

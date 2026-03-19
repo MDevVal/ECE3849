@@ -1,0 +1,15 @@
+eclipse.preferences.version=1
+encoding//Debug/libraries/buttonsDriver/subdir_rules.mk=UTF-8
+encoding//Debug/libraries/buttonsDriver/subdir_vars.mk=UTF-8
+encoding//Debug/libraries/lvgl/src/core/subdir_rules.mk=UTF-8
+encoding//Debug/libraries/lvgl/src/core/subdir_vars.mk=UTF-8
+encoding//Debug/libraries/lvgl/src/display/subdir_rules.mk=UTF-8
+encoding//Debug/libraries/lvgl/src/display/subdir_vars.mk=UTF-8
+encoding//Debug/libraries/lvgl/src/draw/convert/helium/subdir_vars.mk=UTF-8
+encoding//Debug/libraries/timer/subdir_rules.mk=UTF-8
+encoding//Debug/libraries/timer/subdir_vars.mk=UTF-8
+encoding//Debug/makefile=UTF-8
+encoding//Debug/objects.mk=UTF-8
+encoding//Debug/sources.mk=UTF-8
+encoding//Debug/subdir_rules.mk=UTF-8
+encoding//Debug/subdir_vars.mk=UTF-8

@@ -1,0 +1,34 @@
+#ifndef TM4C_TIMER_TIMER_H
+#define TM4C_TIMER_TIMER_H
+
+#include <stdint.h>
+
+class Timer {
+public:
+    // Crea el timer estándar 32-bit
+    Timer();
+
+    // Inicia un Timer estándar 32-bit (TIMERx_BASE) en modo periódico libre
+    void begin(uint32_t sysclkHz, uint32_t timerBase);
+    inline void start(uint32_t sysclkHz, uint32_t timerBase) { begin(sysclkHz, timerBase); }
+
+    // Detener/desregistrar fuente de interrupción si aplica
+    void stop();
+
+    // Poner a cero los contadores (no altera configuración del periférico)
+    void reset();
+
+    // Tiempo transcurrido desde begin() en milisegundos
+    uint64_t millis() const;
+
+    // Tiempo transcurrido desde begin() en microsegundos
+    uint64_t micros() const;
+
+private:
+    // --- Backend Timer estándar 32-bit ---
+    static uint32_t s_timerBase;           // TIMERx_BASE seleccionado
+    static uint32_t s_startTicks32;        // valor inicial (down-counter)
+    static uint32_t s_ticksPerUs32;        // sysclkHz/1e6 para TIMER32
+};
+
+#endif // TM4C_TIMER_TIMER_H

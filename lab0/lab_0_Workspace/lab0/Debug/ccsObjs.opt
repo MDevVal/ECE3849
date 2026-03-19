@@ -1,0 +1,12 @@
+"./main.obj"
+"./startup_ccs.obj"
+"./libraries/buttonsDriver/button.obj"
+"./libraries/display/Crystalfontz128x128_ST7735.obj"
+"./libraries/display/HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.obj"
+"./libraries/joystickDriver/joystick.obj"
+"./libraries/pll/sysctl_pll.obj"
+"./libraries/timerLib/timerLib.obj"
+"../blinky_ccs.cmd"
+-l"C:/ti/TivaWare_C_Series-2.2.0.295/driverlib/ccs/Debug/driverlib.lib"
+-l"C:/ti/TivaWare_C_Series-2.2.0.295/grlib/ccs/Debug/grlib.lib"
+-llibc.a

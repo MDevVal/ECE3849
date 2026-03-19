@@ -1,0 +1,54 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "grlib/grlib.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.h"
+#include "simpleGUI/GUI_Button.h"
+#include "button.h"
+
+// Variables globales
+tContext g_sContext;
+GUI_Button myButton(14, 40, 100, 40, "PRESIONA");
+Button physicalButton(S1); // Cambia el pin por el que uses realmente
+
+// Callback para click
+void onClick() {
+    Graphics_drawStringCentered(&g_sContext, (int8_t*)"CLICK!", -1, 64, 100, false);
+}
+
+// Callback para long press
+void onLongPress() {
+    Graphics_drawStringCentered(&g_sContext, (int8_t*)"LONG PRESS!", -1, 64, 120, false);
+}
+
+int main(void) {
+    // Configura el reloj del sistema
+    SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480), 120000000);
+
+    // Inicializa el display Crystalfontz128x128
+    Crystalfontz128x128_Init();
+    Graphics_initContext(&g_sContext, (tDisplay*)&g_sCrystalfontz128x128);
+    Graphics_setForegroundColor(&g_sContext, GRAPHICS_COLOR_WHITE);
+    Graphics_setBackgroundColor(&g_sContext, GRAPHICS_COLOR_BLACK);
+    Graphics_clearDisplay(&g_sContext);
+
+    // Configura el botón físico y GUI_Button
+    myButton.setOnClick(onClick);
+    myButton.setOnLongPress(onLongPress);
+    myButton.linkPhysicalButton(&physicalButton);
+
+    while (1) {
+        // Actualiza el estado del botón físico
+        physicalButton.tick();
+        // Actualiza el estado del botón GUI
+        myButton.tick();
+
+        // Dibuja el botón
+        myButton.draw(&g_sContext);
+
+        // Pequeño delay para evitar parpadeo y rebotes
+        SysCtlDelay(SysCtlClockGet() / 100); // ~10ms
+    }
+}

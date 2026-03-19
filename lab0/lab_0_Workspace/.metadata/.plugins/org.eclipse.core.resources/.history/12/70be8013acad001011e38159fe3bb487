@@ -1,0 +1,769 @@
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <math.h>
+// FreeRTOS
+extern "C" {
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/fpu.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pwm.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/adc.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+}
+
+// === Custom libs ===
+#include "joystick.h"
+#include "button.h"
+
+// -------------------------------------------------------------
+// Globals
+// -------------------------------------------------------------
+tContext gContext;
+uint32_t gSysClk;
+
+// Buzzer Queue
+typedef struct { uint32_t freq; uint32_t ms; } BuzzerCmd;
+static QueueHandle_t gBuzzerQ;
+
+// Joystick y botones
+Joystick js(JSX, JSY, JS1);
+
+static Button btnS1(S1);
+static Button btnS2(S2);
+
+// -------------------------------------------------------------
+// Game constants
+// -------------------------------------------------------------
+#define GRID_SIZE   16
+#define CELL_PIX    8
+#define MAX_LEN     64
+
+struct Point { uint8_t x, y; };
+static Point snake[MAX_LEN];
+static uint8_t snakeLen = 4;
+static Point fruit;
+static enum { UP, DOWN, LEFT, RIGHT } dir = RIGHT;
+static bool gameOver = false;
+static bool paused = false;
+static bool win = false;
+static uint16_t score = 0;
+
+// -------------------------------------------------------------
+// Utility: Buzzer queue post
+// -------------------------------------------------------------
+static inline void buzzer_post(uint32_t f, uint32_t ms)
+{
+    if (!gBuzzerQ) return;
+    BuzzerCmd cmd{f, ms};
+    xQueueSend(gBuzzerQ, &cmd, 0);
+}
+
+// -------------------------------------------------------------
+// Hardware: LCD + PWM Buzzer
+// -------------------------------------------------------------
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0));
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);
+}
+
+#define BUZZER_PWM_BASE  PWM0_BASE
+#define BUZZER_GEN       PWM_GEN_0
+#define BUZZER_OUTNUM    PWM_OUT_1
+#define BUZZER_OUTBIT    PWM_OUT_1_BIT
+
+void Buzzer_HWInit(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0));
+    GPIOPinConfigure(GPIO_PF1_M0PWM1);
+    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_1);
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_64);
+}
+
+void Buzzer_Start(uint32_t freq)
+{
+    if (freq == 0) return;
+    uint32_t pwmClock = gSysClk / 64;
+    uint32_t period = pwmClock / freq;
+    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_GEN, PWM_GEN_MODE_DOWN);
+    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_GEN, period);
+    PWMPulseWidthSet(BUZZER_PWM_BASE, BUZZER_OUTNUM, period / 2);
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, true);
+    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_GEN);
+}
+
+void Buzzer_Stop(void)
+{
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, false);
+}
+
+// -------------------------------------------------------------
+// Draw functions
+// -------------------------------------------------------------
+void DrawGrid()
+{
+    GrContextForegroundSet(&gContext, ClrBlack);
+    tRectangle bg = {0,0,127,127};
+    GrRectFill(&gContext, &bg);
+
+    for (int i = 0; i < snakeLen; i++) {
+        GrContextForegroundSet(&gContext, ClrGreen);
+        int x1 = snake[i].x * CELL_PIX;
+        int y1 = snake[i].y * CELL_PIX;
+        tRectangle r = {x1, y1, x1+CELL_PIX-1, y1+CELL_PIX-1};
+        GrRectFill(&gContext, &r);
+    }
+
+    GrContextForegroundSet(&gContext, ClrRed);
+    int fx = fruit.x * CELL_PIX;
+    int fy = fruit.y * CELL_PIX;
+    tRectangle fr = {fx, fy, fx+CELL_PIX-1, fy+CELL_PIX-1};
+    GrRectFill(&gContext, &fr);
+
+    char buf[20];
+    snprintf(buf, sizeof(buf), "Score: %u", score);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDraw(&gContext, buf, -1, 4, 4, false);
+    GrFlush(&gContext);
+}
+
+// -------------------------------------------------------------
+// Game logic
+// -------------------------------------------------------------
+// Genera una fruta en una celda libre
+void PlaceFruit()
+{
+    while (1) {
+        bool conflict = false;
+        fruit.x = rand() % GRID_SIZE;
+        fruit.y = rand() % GRID_SIZE;
+        for (int i = 0; i < snakeLen; i++) {
+            if (snake[i].x == fruit.x && snake[i].y == fruit.y) {
+                conflict = true;
+                break;
+            }
+        }
+        if (!conflict) break;
+    }
+}
+
+void ResetGame()
+{
+    snakeLen = 4;
+    for (int i=0; i<snakeLen; i++) { snake[i].x = 8-i; snake[i].y = 8; }
+    dir = RIGHT;
+    score = 0;
+    gameOver = false;
+    paused = false;
+    win = false;
+    PlaceFruit();
+}
+
+void MoveSnake()
+{
+    for (int i = snakeLen-1; i > 0; i--) snake[i] = snake[i-1];
+
+    switch (dir) {
+        case UP:    snake[0].y--; break;
+        case DOWN:  snake[0].y++; break;
+        case LEFT:  snake[0].x--; break;
+        case RIGHT: snake[0].x++; break;
+    }
+
+    if (snake[0].x >= GRID_SIZE || snake[0].y >= GRID_SIZE ||
+        (dir==LEFT && snake[0].x==255) || (dir==UP && snake[0].y==255)) {
+        gameOver = true;
+        buzzer_post(200, 400);
+        return;
+    }
+
+    for (int i=1; i<snakeLen; i++)
+        if (snake[i].x == snake[0].x && snake[i].y == snake[0].y) {
+            gameOver = true;
+            buzzer_post(200, 400);
+            return;
+        }
+
+    if (snake[0].x == fruit.x && snake[0].y == fruit.y) {
+        if (snakeLen < MAX_LEN) {
+            snakeLen++;
+            score++;
+            buzzer_post(600, 60);
+            if (snakeLen == MAX_LEN) {
+                // ¡Victoria!
+                win = true;
+                gameOver = true;
+                buzzer_post(1200, 800);
+                return;
+            }
+            PlaceFruit();
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// Tasks
+// -------------------------------------------------------------
+static void vInputTask(void* arg)
+{
+    js.begin();
+    js.calibrateCenter(32);
+    btnS1.begin();
+    btnS2.begin();
+
+    for(;;) {
+        js.tick();
+        btnS1.tick();
+        btnS2.tick();
+
+        // Pausa/play con S1
+        if (btnS1.wasPressed()) {
+            buzzer_post(900, 40); // Sonido corto
+            if (!gameOver && !win) paused = !paused;
+        }
+        // Reset con S2
+        if (btnS2.wasPressed()) {
+            buzzer_post(500, 40); // Sonido corto
+            ResetGame();
+        }
+
+        if (!paused && !gameOver) {
+            float x = js.x();
+            float y = js.y();
+
+            if (fabsf(x) > fabsf(y)) {
+                if (x > 0.5f && dir != LEFT)  dir = RIGHT;
+                else if (x < -0.5f && dir != RIGHT) dir = LEFT;
+            } else {
+                if (y > 0.5f && dir != DOWN) dir = UP;
+                else if (y < -0.5f && dir != UP) dir = DOWN;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+static void vSnakeTask(void* arg)
+{
+    ResetGame();
+    for(;;) {
+        if (!paused && !gameOver) MoveSnake();
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
+}
+
+static void vRenderTask(void* arg)
+{
+    LCD_Init();
+    static bool parpadeado = false;
+    for(;;) {
+        if (gameOver && !win && !parpadeado) {
+            // Parpadeo de la serpiente al perder
+            for (int i = 0; i < 6; i++) {
+                // Oculta
+                GrContextForegroundSet(&gContext, ClrBlack);
+                for (int j = 0; j < snakeLen; j++) {
+                    int x1 = snake[j].x * CELL_PIX;
+                    int y1 = snake[j].y * CELL_PIX;
+                    tRectangle r = {x1, y1, x1+CELL_PIX-1, y1+CELL_PIX-1};
+                    GrRectFill(&gContext, &r);
+                }
+                GrFlush(&gContext);
+                vTaskDelay(pdMS_TO_TICKS(120));
+                // Muestra
+                DrawGrid();
+                vTaskDelay(pdMS_TO_TICKS(120));
+            }
+            parpadeado = true;
+        } else if (!gameOver) {
+            parpadeado = false;
+            DrawGrid();
+        } else {
+            DrawGrid();
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+static void vBuzzerTask(void* arg)
+{
+    Buzzer_HWInit();
+    BuzzerCmd cmd;
+    for(;;) {
+        if (xQueueReceive(gBuzzerQ, &cmd, portMAX_DELAY) == pdTRUE) {
+            Buzzer_Start(cmd.freq);
+            vTaskDelay(pdMS_TO_TICKS(cmd.ms));
+            Buzzer_Stop();
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// main()
+// -------------------------------------------------------------
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                                  SYSCTL_USE_PLL | SYSCTL_CFG_VCO_240), 120000000);
+
+    srand(1234);
+    gBuzzerQ = xQueueCreate(4, sizeof(BuzzerCmd));
+
+    xTaskCreate(vInputTask, "Input", 512, nullptr, 2, nullptr);
+    xTaskCreate(vSnakeTask, "Snake", 512, nullptr, 2, nullptr);
+    xTaskCreate(vRenderTask, "Render", 768, nullptr, 1, nullptr);
+    xTaskCreate(vBuzzerTask, "Buzzer", 512, nullptr, 1, nullptr);
+
+    vTaskStartScheduler();
+    while(1);
+}
+
+
+extern "C" void vApplicationIdleHook(void)
+{
+    // Se llama cuando no hay tareas listas para ejecutar
+    // Puedes poner bajo consumo o un LED heartbeat
+}
+
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+    // Aquí podrías encender un LED rojo o hacer un beep largo
+    while (1) {
+        // Loop infinito para depuración
+    }
+}
+
+/*
+============================
+  SNAKE GAME WITH FreeRTOS
+  Detailed English Comments
+============================
+
+This code implements the classic Snake game for an embedded system using FreeRTOS. It uses a TFT LCD for graphics, a joystick for input, and a PWM buzzer for sound feedback. The game logic and hardware control are split into FreeRTOS tasks.
+*/
+
+// ===========================
+//        INCLUDES
+// ===========================
+
+// Standard C/C++ headers
+#include <stdio.h>      // Standard I/O functions
+#include <stdint.h>     // Standard integer types
+#include <stdbool.h>    // Boolean type
+#include <stdlib.h>     // Standard library (rand, etc.)
+#include <math.h>       // Math functions (fabsf)
+
+// FreeRTOS and hardware drivers (C linkage)
+extern "C" {
+#include "FreeRTOS.h"   // FreeRTOS core
+#include "task.h"       // FreeRTOS tasks
+#include "queue.h"      // FreeRTOS queues
+#include "semphr.h"     // FreeRTOS semaphores
+#include "driverlib/sysctl.h"   // System control (clock, etc.)
+#include "driverlib/fpu.h"      // Floating Point Unit control
+#include "driverlib/gpio.h"     // GPIO control
+#include "driverlib/pwm.h"      // PWM control (buzzer)
+#include "driverlib/pin_map.h"  // Pin mapping
+#include "driverlib/adc.h"      // ADC (joystick)
+#include "Crystalfontz128x128_ST7735.h" // LCD driver
+#include "grlib/grlib.h"        // Graphics library
+}
+
+// Custom libraries for joystick and button abstraction
+#include "joystick.h"
+#include "button.h"
+
+// ===========================
+//        GLOBALS
+// ===========================
+
+// Graphics context for the LCD
+tContext gContext;
+// System clock frequency (Hz)
+uint32_t gSysClk;
+
+// Buzzer command structure and queue handle
+typedef struct { uint32_t freq; uint32_t ms; } BuzzerCmd;
+static QueueHandle_t gBuzzerQ;
+
+// Joystick and button objects
+Joystick js(JSX, JSY, JS1); // Joystick (X, Y, button)
+static Button btnS1(S1);    // Button S1 (pause)
+static Button btnS2(S2);    // Button S2 (reset)
+
+// ===========================
+//     GAME CONSTANTS & STATE
+// ===========================
+
+#define GRID_SIZE   16   // Number of cells per row/column
+#define CELL_PIX    8    // Size of each cell in pixels
+#define MAX_LEN     64   // Maximum snake length
+
+// Point structure for grid positions
+struct Point { uint8_t x, y; };
+static Point snake[MAX_LEN];      // Snake body (array of points)
+static uint8_t snakeLen = 4;      // Current snake length
+static Point fruit;               // Fruit position
+static enum { UP, DOWN, LEFT, RIGHT } dir = RIGHT; // Current direction
+static bool gameOver = false;     // Game over flag
+static bool paused = false;       // Pause flag
+static bool win = false;          // Win flag
+static uint16_t score = 0;        // Score counter
+
+// ===========================
+//   BUZZER QUEUE POST UTILITY
+// ===========================
+
+// Posts a buzzer command (frequency and duration) to the buzzer queue
+static inline void buzzer_post(uint32_t f, uint32_t ms)
+{
+    if (!gBuzzerQ) return;
+    BuzzerCmd cmd{f, ms};
+    xQueueSend(gBuzzerQ, &cmd, 0);
+}
+
+// ===========================
+//   HARDWARE INITIALIZATION
+// ===========================
+
+// Initializes the LCD display and graphics context
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);   // Enable SSI0 (SPI for LCD)
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);  // Enable GPIOA (LCD pins)
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);  // Enable GPIOM (LCD pins)
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);  // Enable GPIOD (LCD pins)
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0)); // Wait for ready
+
+    Crystalfontz128x128_Init();                   // Initialize LCD
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP); // Set orientation
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);      // Init graphics
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);          // Set font
+}
+
+// Buzzer PWM hardware definitions
+#define BUZZER_PWM_BASE  PWM0_BASE
+#define BUZZER_GEN       PWM_GEN_0
+#define BUZZER_OUTNUM    PWM_OUT_1
+#define BUZZER_OUTBIT    PWM_OUT_1_BIT
+
+// Initializes the PWM hardware for the buzzer
+void Buzzer_HWInit(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);   // Enable PWM0
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);  // Enable GPIOF (buzzer pin)
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0));      // Wait for ready
+    GPIOPinConfigure(GPIO_PF1_M0PWM1);            // Map PF1 to PWM1
+    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_1);  // Set PF1 as PWM output
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_64);    // Set PWM clock divider
+}
+
+// Starts the buzzer at a given frequency (Hz)
+void Buzzer_Start(uint32_t freq)
+{
+    if (freq == 0) return;
+    uint32_t pwmClock = gSysClk / 64;             // Get PWM clock
+    uint32_t period = pwmClock / freq;            // Calculate period
+    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_GEN, PWM_GEN_MODE_DOWN); // Down count
+    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_GEN, period);           // Set period
+    PWMPulseWidthSet(BUZZER_PWM_BASE, BUZZER_OUTNUM, period / 2);   // 50% duty
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, true);           // Enable output
+    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_GEN);                      // Enable generator
+}
+
+// Stops the buzzer
+void Buzzer_Stop(void)
+{
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, false); // Disable output
+}
+
+// ===========================
+//      DRAWING FUNCTIONS
+// ===========================
+
+// Draws the game grid, snake, fruit, and score on the LCD
+void DrawGrid()
+{
+    GrContextForegroundSet(&gContext, ClrBlack); // Clear background
+    tRectangle bg = {0,0,127,127};
+    GrRectFill(&gContext, &bg);
+
+    // Draw snake body
+    for (int i = 0; i < snakeLen; i++) {
+        GrContextForegroundSet(&gContext, ClrGreen);
+        int x1 = snake[i].x * CELL_PIX;
+        int y1 = snake[i].y * CELL_PIX;
+        tRectangle r = {x1, y1, x1+CELL_PIX-1, y1+CELL_PIX-1};
+        GrRectFill(&gContext, &r);
+    }
+
+    // Draw fruit
+    GrContextForegroundSet(&gContext, ClrRed);
+    int fx = fruit.x * CELL_PIX;
+    int fy = fruit.y * CELL_PIX;
+    tRectangle fr = {fx, fy, fx+CELL_PIX-1, fy+CELL_PIX-1};
+    GrRectFill(&gContext, &fr);
+
+    // Draw score
+    char buf[20];
+    snprintf(buf, sizeof(buf), "Score: %u", score);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDraw(&gContext, buf, -1, 4, 4, false);
+    GrFlush(&gContext); // Update LCD
+}
+
+// ===========================
+//        GAME LOGIC
+// ===========================
+
+// Places the fruit in a random free cell (not occupied by the snake)
+void PlaceFruit()
+{
+    while (1) {
+        bool conflict = false;
+        fruit.x = rand() % GRID_SIZE;
+        fruit.y = rand() % GRID_SIZE;
+        // Check if fruit overlaps with snake
+        for (int i = 0; i < snakeLen; i++) {
+            if (snake[i].x == fruit.x && snake[i].y == fruit.y) {
+                conflict = true;
+                break;
+            }
+        }
+        if (!conflict) break;
+    }
+}
+
+// Resets the game state to initial values
+void ResetGame()
+{
+    snakeLen = 4;
+    for (int i=0; i<snakeLen; i++) { snake[i].x = 8-i; snake[i].y = 8; }
+    dir = RIGHT;
+    score = 0;
+    gameOver = false;
+    paused = false;
+    win = false;
+    PlaceFruit();
+}
+
+// Moves the snake one step in the current direction, handles collisions and fruit
+void MoveSnake()
+{
+    // Move body: each segment takes the place of the previous one
+    for (int i = snakeLen-1; i > 0; i--) snake[i] = snake[i-1];
+
+    // Move head in the current direction
+    switch (dir) {
+        case UP:    snake[0].y--; break;
+        case DOWN:  snake[0].y++; break;
+        case LEFT:  snake[0].x--; break;
+        case RIGHT: snake[0].x++; break;
+    }
+
+    // Check for wall collision (out of bounds)
+    if (snake[0].x >= GRID_SIZE || snake[0].y >= GRID_SIZE ||
+        (dir==LEFT && snake[0].x==255) || (dir==UP && snake[0].y==255)) {
+        gameOver = true;
+        buzzer_post(200, 400); // Game over sound
+        return;
+    }
+
+    // Check for self-collision
+    for (int i=1; i<snakeLen; i++)
+        if (snake[i].x == snake[0].x && snake[i].y == snake[0].y) {
+            gameOver = true;
+            buzzer_post(200, 400); // Game over sound
+            return;
+        }
+
+    // Check for fruit collision
+    if (snake[0].x == fruit.x && snake[0].y == fruit.y) {
+        if (snakeLen < MAX_LEN) {
+            snakeLen++;      // Grow snake
+            score++;         // Increase score
+            buzzer_post(600, 60); // Eat sound
+            if (snakeLen == MAX_LEN) {
+                // Win condition
+                win = true;
+                gameOver = true;
+                buzzer_post(1200, 800); // Win sound
+                return;
+            }
+            PlaceFruit();    // Place new fruit
+        }
+    }
+}
+
+// ===========================
+//         TASKS
+// ===========================
+
+// Task: Handles input from joystick and buttons
+static void vInputTask(void* arg)
+{
+    js.begin();
+    js.calibrateCenter(32); // Calibrate joystick center
+    btnS1.begin();
+    btnS2.begin();
+
+    for(;;) {
+        js.tick();      // Update joystick state
+        btnS1.tick();   // Update button S1
+        btnS2.tick();   // Update button S2
+
+        // Pause/play with S1
+        if (btnS1.wasPressed()) {
+            buzzer_post(900, 40); // Short beep
+            if (!gameOver && !win) paused = !paused;
+        }
+        // Reset with S2
+        if (btnS2.wasPressed()) {
+            buzzer_post(500, 40); // Short beep
+            ResetGame();
+        }
+
+        // Change direction with joystick (if not paused or game over)
+        if (!paused && !gameOver) {
+            float x = js.x();
+            float y = js.y();
+
+            // Determine direction based on joystick axis
+            if (fabsf(x) > fabsf(y)) {
+                if (x > 0.5f && dir != LEFT)  dir = RIGHT;
+                else if (x < -0.5f && dir != RIGHT) dir = LEFT;
+            } else {
+                if (y > 0.5f && dir != DOWN) dir = UP;
+                else if (y < -0.5f && dir != UP) dir = DOWN;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10)); // 10 ms delay
+    }
+}
+
+// Task: Handles snake movement and game logic
+static void vSnakeTask(void* arg)
+{
+    ResetGame(); // Start with a fresh game
+    for(;;) {
+        if (!paused && !gameOver) MoveSnake();
+        vTaskDelay(pdMS_TO_TICKS(150)); // Snake speed (150 ms per move)
+    }
+}
+
+// Task: Handles rendering the game to the LCD
+static void vRenderTask(void* arg)
+{
+    LCD_Init();
+    static bool parpadeado = false; // Used for snake blink effect on game over
+    for(;;) {
+        if (gameOver && !win && !parpadeado) {
+            // Blink snake when losing
+            for (int i = 0; i < 6; i++) {
+                // Hide snake
+                GrContextForegroundSet(&gContext, ClrBlack);
+                for (int j = 0; j < snakeLen; j++) {
+                    int x1 = snake[j].x * CELL_PIX;
+                    int y1 = snake[j].y * CELL_PIX;
+                    tRectangle r = {x1, y1, x1+CELL_PIX-1, y1+CELL_PIX-1};
+                    GrRectFill(&gContext, &r);
+                }
+                GrFlush(&gContext);
+                vTaskDelay(pdMS_TO_TICKS(120));
+                // Show snake
+                DrawGrid();
+                vTaskDelay(pdMS_TO_TICKS(120));
+            }
+            parpadeado = true;
+        } else if (!gameOver) {
+            parpadeado = false;
+            DrawGrid(); // Normal rendering
+        } else {
+            DrawGrid(); // Game over (no blink)
+        }
+        vTaskDelay(pdMS_TO_TICKS(50)); // 50 ms refresh
+    }
+}
+
+// Task: Handles buzzer sound playback
+static void vBuzzerTask(void* arg)
+{
+    Buzzer_HWInit(); // Initialize hardware
+    BuzzerCmd cmd;
+    for(;;) {
+        if (xQueueReceive(gBuzzerQ, &cmd, portMAX_DELAY) == pdTRUE) {
+            Buzzer_Start(cmd.freq);           // Start buzzer
+            vTaskDelay(pdMS_TO_TICKS(cmd.ms)); // Play for duration
+            Buzzer_Stop();                    // Stop buzzer
+        }
+    }
+}
+
+// ===========================
+//           MAIN
+// ===========================
+
+// Main entry point: initializes hardware, creates tasks, and starts scheduler
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                                  SYSCTL_USE_PLL | SYSCTL_CFG_VCO_240), 120000000); // Set system clock to 120 MHz
+
+    srand(1234); // Seed random number generator
+    gBuzzerQ = xQueueCreate(4, sizeof(BuzzerCmd)); // Create buzzer queue
+
+    // Create FreeRTOS tasks
+    xTaskCreate(vInputTask, "Input", 512, nullptr, 2, nullptr);   // Input task (priority 2)
+    xTaskCreate(vSnakeTask, "Snake", 512, nullptr, 2, nullptr);   // Snake logic (priority 2)
+    xTaskCreate(vRenderTask, "Render", 768, nullptr, 1, nullptr); // Rendering (priority 1)
+    xTaskCreate(vBuzzerTask, "Buzzer", 512, nullptr, 1, nullptr); // Buzzer (priority 1)
+
+    vTaskStartScheduler(); // Start FreeRTOS scheduler
+    while(1); // Should never reach here
+}
+
+// ===========================
+//   FreeRTOS HOOK FUNCTIONS
+// ===========================
+
+// Idle hook: called when no tasks are ready to run
+extern "C" void vApplicationIdleHook(void)
+{
+    // You can implement low-power mode or a heartbeat LED here
+}
+
+// Stack overflow hook: called if a task overflows its stack
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+    // You could turn on a red LED or make a long beep here
+    while (1) {
+        // Infinite loop for debugging
+    }
+}
+

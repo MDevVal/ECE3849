@@ -1,0 +1,92 @@
+#include "GUI_Button.h"
+
+GUI_Button::GUI_Button(int x, int y, int w, int h, const char* text)
+    : _x(x), _y(y), _w(w), _h(h),
+      _text(text),
+      _state(State::NORMAL),
+      _colorNormal(ClrDarkBlue),
+      _colorFocused(ClrBlue),
+      _colorPressed(ClrGray),
+      _colorText(ClrWhite),
+      _onClick(nullptr),
+      _onLongPress(nullptr),
+      _linkedButton(nullptr)
+{
+}
+
+void GUI_Button::setColors(uint32_t normal, uint32_t focused, uint32_t pressed, uint32_t textColor) {
+    _colorNormal = normal;
+    _colorFocused = focused;
+    _colorPressed = pressed;
+    _colorText = textColor;
+}
+
+void GUI_Button::setText(const char* txt) {
+    _text = txt;
+}
+
+void GUI_Button::setState(State s) {
+    _state = s;
+}
+
+GUI_Button::State GUI_Button::getState() const {
+    return _state;
+}
+
+void GUI_Button::setOnClick(Button::callbackFunction fn) {
+    _onClick = fn;
+}
+
+void GUI_Button::setOnLongPress(Button::callbackFunction fn) {
+    _onLongPress = fn;
+}
+
+void GUI_Button::attachButton(Button* hwButton) {
+    _linkedButton = hwButton;
+    if (!hwButton) return;
+
+    if (_onClick)
+        hwButton->attachClick(_onClick);
+    if (_onLongPress)
+        hwButton->attachLongPressStart(_onLongPress);
+
+}
+
+void GUI_Button::draw(tContext* ctx) {
+    tRectangle rect;
+    rect.i16XMin = (int16_t)_x;
+    rect.i16YMin = (int16_t)_y;
+    rect.i16XMax = (int16_t)(_x + _w - 1);
+    rect.i16YMax = (int16_t)(_y + _h - 1);
+
+    uint32_t color = _colorNormal;
+    if (_state == State::FOCUSED) color = _colorFocused;
+    else if (_state == State::PRESSED) color = _colorPressed;
+
+    GrContextForegroundSet(ctx, color);
+    GrRectFill(ctx, &rect);
+
+    // Borde
+    GrContextForegroundSet(ctx, ClrBlack);
+    GrRectDraw(ctx, &rect);
+
+    // Texto centrado
+    GrContextForegroundSet(ctx, _colorText);
+    int16_t textWidth = GrStringWidthGet(ctx, _text, -1);
+    int16_t textX = _x + (_w - textWidth) / 2;
+    int16_t textY = _y + (_h - GrFontHeightGet(ctx->pFont)) / 2;
+    GrStringDraw(ctx, _text, -1, textX, textY, false);
+}
+
+void GUI_Button::update() {
+    if (!_linkedButton) return;
+
+    // Actualizar estado visual basado en el botón físico
+    if (_linkedButton->isPressed()) {
+        _state = State::PRESSED;
+    } else if (_linkedButton->wasReleased()) {
+        _state = State::FOCUSED;
+    } else {
+        _state = State::NORMAL;
+    }
+}

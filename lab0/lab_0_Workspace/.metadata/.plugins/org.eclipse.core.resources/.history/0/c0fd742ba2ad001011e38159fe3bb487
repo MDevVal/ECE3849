@@ -1,0 +1,583 @@
+/**
+ * main_freertos.cpp — Multi-screen demo (Light + Joystick + Mic + Accel) on FreeRTOS
+ * Hardware:
+ *  - EK-TM4C1294XL LaunchPad
+ *  - BoosterPack MKII (OPT3001, Joystick, Mic, Accelerometer)
+ *  - LCD Crystalfontz128x128 (SPI0)
+ *  - Buttons S1 (PA7), S2 (PA6)
+ * Author: Edwin A. Rodríguez, 2025 — FreeRTOS port by ChatGPT
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+#include <stdlib.h>
+
+// ===================== TivaWare =====================
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/fpu.h"
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/pwm.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "OPT3001.h"
+}
+
+// ===================== FreeRTOS =====================
+extern "C" {
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
+#include "semphr.h"
+}
+
+// ===================== Tus librerías =================
+#include "button.h"
+#include "joystick.h"
+
+// ----------------------------------------------------
+// Globals compartidos
+// ----------------------------------------------------
+tContext gContext;
+uint32_t gSysClk = 120000000;
+
+// Buttons / Joystick (igual que en tu código)
+Button   btnLeft(S1, 2, 50, 25, ButtonPull::PullUp);
+Button   btnRight(S2, 2, 50, 25, ButtonPull::PullUp);
+Joystick js(JSX, JSY, JS1);
+
+// Screen management
+enum ScreenID { SCREEN_LUX = 0, SCREEN_JOYSTICK, SCREEN_MIC, SCREEN_ACCEL, SCREEN_COUNT };
+volatile uint8_t currentScreen = SCREEN_LUX;
+
+// Sensores (compartidos entre tareas)
+volatile float gLuxValue  = 0.0f;
+volatile float gMicLevel  = 0.0f;   // 0..1 (log-VU como antes)
+volatile float gAx = 0, gAy = 0, gAz = 0;
+
+// Mutex opcional si en algún momento dibuja más de una tarea (ahora solo UI dibuja)
+SemaphoreHandle_t gUICtxMutex;
+QueueHandle_t gBuzzerQ;
+gUICtxMutex = xSemaphoreCreateMutex();
+
+// ----------------------------------------------------
+// Buzzer por PWM usando tarea + cola (no bloqueante)
+// ----------------------------------------------------
+typedef struct {
+    uint32_t freq_hz;
+    uint32_t duration_ms;
+} BuzzerCmd;
+
+static QueueHandle_t gBuzzerQ;
+
+// Prototipos de funciones de periféricos/dibujo (Parte 2)
+extern "C" void LCD_Init(void);
+extern "C" void ADC_Init(void);
+extern "C" uint16_t Mic_Read(void);
+extern "C" void Accel_Read(float *x, float *y, float *z);
+extern "C" float Mic_Level(void);
+extern "C" void Buzzer_HWInit(void);
+extern "C" void Buzzer_Start(uint32_t freq_hz);
+extern "C" void Buzzer_Stop(void);
+extern "C" void DrawHeader(const char *title, bool leftActive, bool rightActive);
+extern "C" void Draw_Lux(float lux);
+extern "C" void Draw_Joystick(float x, float y);
+extern "C" void Draw_Mic(float level);
+extern "C" void Particles_Init(void);
+extern "C" void Draw_Accelerometer(float ax, float ay);
+
+// ----------------------------------------------------
+// Callbacks de botones (cambian pantalla y piden beep)
+// ----------------------------------------------------
+static inline void buzzer_post(uint32_t f, uint32_t ms)
+{
+    if (!gBuzzerQ) return;
+    BuzzerCmd cmd{f, ms};
+    (void)xQueueSend(gBuzzerQ, &cmd, 0); // no bloquear
+}
+
+void OnLeftClick()
+{
+    // Beep corto grave
+    buzzer_post(200, 40);
+    // Pantalla previa (con wrap)
+    uint8_t s = currentScreen;
+    currentScreen = (s > 0) ? (s - 1) : (SCREEN_COUNT - 1);
+}
+
+void OnRightClick()
+{
+    // Beep corto agudo
+    buzzer_post(300, 40);
+    // Pantalla siguiente (con wrap)
+    currentScreen = (uint8_t)((currentScreen + 1) % SCREEN_COUNT);
+}
+
+// ----------------------------------------------------
+// Tareas
+// ----------------------------------------------------
+
+// 1) Servicio de entradas (botones + joystick) — 10 ms
+static void vInputServiceTask(void *arg)
+{
+    (void)arg;
+    // Inicializa tus drivers de entrada
+    btnLeft.begin();
+    btnRight.begin();
+    js.begin();
+    js.calibrateCenter(32);
+
+    // Asigna callbacks
+    btnLeft.attachClick(&OnLeftClick);
+    btnRight.attachClick(&OnRightClick);
+
+    for (;;)
+    {
+        // Tick de tus librerías (fiel a tu requerimiento)
+        btnLeft.tick();
+        btnRight.tick();
+        js.tick();
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// 2) Tarea de LUX (OPT3001) — 1000 ms
+static void vLuxTask(void *arg)
+{
+    (void)arg;
+    // OPT3001
+    OPT3001_Init();
+
+    for (;;)
+    {
+        float lx = OPT3001_ReadLux();
+        gLuxValue = lx;  // write atomically (float assignment is atomic on Cortex-M)
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// 3) Tarea de Mic — 50 ms (calcula nivel RMS log)
+static void vMicTask(void *arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        gMicLevel = Mic_Level();
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// 4) Tarea de UI — 50 ms (única que dibuja)
+static void vUITask(void *arg)
+{
+    (void)arg;
+
+    // LCD + GFX
+    LCD_Init();
+    Particles_Init();
+
+    for (;;)
+    {
+        uint8_t s = currentScreen;
+
+        // Tomamos snapshot de datos compartidos
+        float lux = gLuxValue;
+        float mic = gMicLevel;
+
+        switch (s)
+        {
+            case SCREEN_LUX:
+                Draw_Lux(lux);
+                break;
+
+            case SCREEN_JOYSTICK:
+                Draw_Joystick(js.x(), js.y());
+                break;
+
+            case SCREEN_MIC:
+                Draw_Mic(mic);
+                break;
+
+            case SCREEN_ACCEL:
+            default:
+                Accel_Read((float*)&gAx, (float*)&gAy, (float*)&gAz);
+                Draw_Accelerometer(gAx, gAy);
+                break;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+// 5) Tarea del Buzzer: toma comandos por cola y genera PWM el tiempo pedido
+static void vBuzzerTask(void *arg)
+{
+    (void)arg;
+    Buzzer_HWInit();
+
+    BuzzerCmd cmd;
+    for (;;)
+    {
+        if (xQueueReceive(gBuzzerQ, &cmd, portMAX_DELAY) == pdTRUE)
+        {
+            if (cmd.freq_hz > 0 && cmd.duration_ms > 0)
+            {
+                Buzzer_Start(cmd.freq_hz);
+                vTaskDelay(pdMS_TO_TICKS(cmd.duration_ms));
+                Buzzer_Stop();
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------
+// Hooks requeridos por FreeRTOS (evitan "unresolved symbol ...")
+// ----------------------------------------------------
+extern "C" void vApplicationIdleHook(void)
+{
+}
+
+extern "C" void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+    while (1) {}
+}
+
+// ----------------------------------------------------
+// main() — arranque del sistema + scheduler
+// ----------------------------------------------------
+int main(void)
+{
+    // FPU + reloj
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                                  SYSCTL_USE_PLL | SYSCTL_CFG_VCO_240), 120000000);
+
+    // ADC para mic+accel
+    ADC_Init();
+
+    // Mutex UI (por si luego hay más tareas que dibujan)
+    gUICtxMutex = xSemaphoreCreateMutexStatic(&gUICtxMutexBuf);
+
+    // Cola del buzzer
+    gBuzzerQ = xQueueCreate(4, sizeof(BuzzerCmd));
+
+    // Crea tareas (prioridades relativas)
+    xTaskCreate(vInputServiceTask, "InputSvc", 512,  nullptr, tskIDLE_PRIORITY + 3, nullptr);
+    xTaskCreate(vLuxTask,          "Lux",      512,  nullptr, tskIDLE_PRIORITY + 1, nullptr);
+    xTaskCreate(vMicTask,          "Mic",      640,  nullptr, tskIDLE_PRIORITY + 2, nullptr);
+    xTaskCreate(vUITask,           "UI",       768,  nullptr, tskIDLE_PRIORITY + 2, nullptr);
+    xTaskCreate(vBuzzerTask,       "Buzzer",   512,  nullptr, tskIDLE_PRIORITY + 2, nullptr);
+
+    // Inicia el scheduler
+    vTaskStartScheduler();
+
+    // No debería regresar
+    while (1) {}
+}
+
+
+// =================== Periféricos / Dibujo (Parte 2) ===================
+extern "C" {
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/ssi.h"
+#include "driverlib/pwm.h"
+#include "driverlib/rom_map.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+}
+
+extern tContext gContext;
+extern uint32_t gSysClk;
+
+// ---------------- ADC Mic/Accel como en tu código ----------------
+#define MIC_ADC_BASE      ADC0_BASE
+#define MIC_ADC_SEQ       3
+#define MIC_ADC_CHANNEL   ADC_CTL_CH8  // PE5 -> AIN8
+
+#define ACC_ADC_SEQ       2
+#define ACC_CH_X          ADC_CTL_CH3  // PE0
+#define ACC_CH_Y          ADC_CTL_CH2  // PE1
+#define ACC_CH_Z          ADC_CTL_CH1  // PE2
+
+void ADC_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_ADC0));
+
+    GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_5);
+
+    // Mic (SEQ3)
+    ADCSequenceConfigure(ADC0_BASE, MIC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, MIC_ADC_SEQ, 0, MIC_ADC_CHANNEL | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, MIC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, MIC_ADC_SEQ);
+
+    // Accelerometer (SEQ2)
+    ADCSequenceConfigure(ADC0_BASE, ACC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 0, ACC_CH_X);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 1, ACC_CH_Y);
+    ADCSequenceStepConfigure(ADC0_BASE, ACC_ADC_SEQ, 2, ACC_CH_Z | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, ACC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, ACC_ADC_SEQ);
+}
+
+uint16_t Mic_Read(void)
+{
+    uint32_t value;
+    ADCProcessorTrigger(MIC_ADC_BASE, MIC_ADC_SEQ);
+    while (!ADCIntStatus(MIC_ADC_BASE, MIC_ADC_SEQ, false));
+    ADCIntClear(MIC_ADC_BASE, MIC_ADC_SEQ);
+    ADCSequenceDataGet(MIC_ADC_BASE, MIC_ADC_SEQ, &value);
+    return (uint16_t)value;
+}
+
+void Accel_Read(float *x, float *y, float *z)
+{
+    uint32_t raw[3];
+    ADCProcessorTrigger(ADC0_BASE, ACC_ADC_SEQ);
+    while (!ADCIntStatus(ADC0_BASE, ACC_ADC_SEQ, false));
+    ADCIntClear(ADC0_BASE, ACC_ADC_SEQ);
+    ADCSequenceDataGet(ADC0_BASE, ACC_ADC_SEQ, raw);
+
+    *x = ((float)raw[0] - 2048.0f) / 2048.0f;
+    *y = ((float)raw[1] - 2048.0f) / 2048.0f;
+    *z = ((float)raw[2] - 2048.0f) / 2048.0f;
+}
+
+// ------- Nivel de mic (idéntico) -------
+float Mic_Level(void)
+{
+    const int N = 128;
+    float sum = 0.0f;
+    for (int i = 0; i < N; i++)
+    {
+        uint16_t s = Mic_Read();
+        float v = (float)s / 4095.0f;
+        float ac = v - 0.5f;
+        sum += ac * ac;
+    }
+    float rms = sqrtf(sum / N);
+    if (rms < 0.0001f) rms = 0.0001f;
+
+    float db = 20.0f * log10f(rms / 0.25f);
+    if (db < -60.0f) db = -60.0f;
+    if (db > 0.0f) db = 0.0f;
+
+    float level = (db + 60.0f) / 60.0f;
+    return level;
+}
+
+// ---------------- LCD/GRLIB (idéntico) ----------------
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0));
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);
+}
+
+// ---------------- Header y pantallas (idéntico) ----------------
+extern Button btnLeft;
+extern Button btnRight;
+
+void DrawHeader(const char *title, bool leftActive, bool rightActive)
+{
+    tRectangle header = {0, 0, 127, 20};
+    GrContextForegroundSet(&gContext, ClrDarkBlue);
+    GrRectFill(&gContext, &header);
+
+    GrContextForegroundSet(&gContext, leftActive ? ClrYellow : ClrGray);
+    GrStringDraw(&gContext, "<", -1, 4, 6, false);
+
+    GrContextForegroundSet(&gContext, rightActive ? ClrYellow : ClrGray);
+    GrStringDraw(&gContext, ">", -1, 118, 6, false);
+
+    GrContextForegroundSet(&gContext, ClrWhite);
+    GrStringDrawCentered(&gContext, title, -1, 64, 7, false);
+}
+
+void Draw_Lux(float lux)
+{
+    const float LUX_MAX = 1000.0f;
+    int barWidth = (int)((lux / LUX_MAX) * 100);
+    if (barWidth > 100) barWidth = 100;
+
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Ambient Light", btnLeft.isPressed(), btnRight.isPressed());
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.2f lx", lux);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 50, false);
+
+    tRectangle fill = {14, 80, 14 + barWidth, 95};
+    GrContextForegroundSet(&gContext, ClrGreen);
+    GrRectFill(&gContext, &fill);
+    GrFlush(&gContext);
+}
+
+void Draw_Joystick(float x, float y)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Joystick", btnLeft.isPressed(), btnRight.isPressed());
+
+    int cx = 64, cy = 75, radius = 40;
+    GrContextForegroundSet(&gContext, ClrWhite);
+    GrCircleDraw(&gContext, cx, cy, radius);
+
+    int px = cx + (int)(x * radius);
+    int py = cy - (int)(y * radius);
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrCircleFill(&gContext, px, py, 3);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "X=%.2f Y=%.2f", x, y);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+
+    GrFlush(&gContext);
+}
+
+void Draw_Mic(float level)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Microphone", btnLeft.isPressed(), btnRight.isPressed());
+
+    const int barX1 = 55, barX2 = 73, barY1 = 25, barY2 = 120;
+    const int barHeight = barY2 - barY1;
+
+    tRectangle outline = {barX1 - 2, barY1 - 2, barX2 + 2, barY2 + 2};
+    GrContextForegroundSet(&gContext, ClrGray);
+    GrRectDraw(&gContext, &outline);
+
+    if (level < 0) level = 0; if (level > 1) level = 1;
+    int filled = (int)(level * barHeight);
+    int yStart = barY2 - filled;
+
+    for (int y = barY2; y > yStart; y--)
+    {
+        float f = (float)(barY2 - y) / barHeight;
+        uint32_t c = (f < 0.6f ? ClrGreen : f < 0.85f ? ClrYellow : ClrRed);
+        GrContextForegroundSet(&gContext, c);
+        GrLineDrawH(&gContext, barX1, barX2, y);
+    }
+
+    char buf[32];
+    float dbVal = (level * 60.0f) - 60.0f;
+    snprintf(buf, sizeof(buf), "%.1f dB", dbVal);
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+    GrFlush(&gContext);
+}
+
+// ---------------- Partículas/Accel (idéntico) ----------------
+#define NUM_PARTICLES 40
+struct Particle { float x, y; float vx, vy; };
+static Particle p[NUM_PARTICLES];
+
+void Particles_Init(void)
+{
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        p[i].x = rand() % 128;
+        p[i].y = 30 + rand() % 90;
+        p[i].vx = 0;
+        p[i].vy = 0;
+    }
+}
+
+void Draw_Accelerometer(float ax, float ay)
+{
+    tRectangle bg = {0, 21, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+    DrawHeader("Accelerometer", btnLeft.isPressed(), btnRight.isPressed());
+
+    float gx = ax * 0.9f;
+    float gy = -ay * 0.9f;
+
+    for (int i = 0; i < NUM_PARTICLES; i++) {
+        p[i].vx += gx;
+        p[i].vy += gy;
+        p[i].x  += p[i].vx;
+        p[i].y  += p[i].vy;
+
+        if (p[i].x < 0)   { p[i].x = 0;   p[i].vx *= -0.7f; }
+        if (p[i].x > 127) { p[i].x = 127; p[i].vx *= -0.7f; }
+        if (p[i].y < 25)  { p[i].y = 25;  p[i].vy *= -0.7f; }
+        if (p[i].y > 125) { p[i].y = 125; p[i].vy *= -0.7f; }
+
+        GrContextForegroundSet(&gContext, ClrCyan);
+        GrCircleFill(&gContext, (int)p[i].x, (int)p[i].y, 2);
+    }
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "AX=%.2f AY=%.2f", ax, ay);
+    GrContextForegroundSet(&gContext, ClrYellow);
+    GrStringDrawCentered(&gContext, buf, -1, 64, 115, false);
+    GrFlush(&gContext);
+}
+
+// ---------------- Buzzer HW (no bloqueante) ----------------
+// PF1 -> M0PWM1  (PWM0 Gen0 Out1)
+#define BUZZER_PWM_BASE    PWM0_BASE
+#define BUZZER_GEN         PWM_GEN_0
+#define BUZZER_OUTNUM      PWM_OUT_1
+#define BUZZER_OUTBIT      PWM_OUT_1_BIT
+
+void Buzzer_HWInit(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_PWM0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOF);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_PWM0));
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOF));
+
+    GPIOPinConfigure(GPIO_PF1_M0PWM1);
+    GPIOPinTypePWM(GPIO_PORTF_BASE, GPIO_PIN_1);
+
+    // Reloj PWM = SysClk/64
+    PWMClockSet(PWM0_BASE, PWM_SYSCLK_DIV_64);
+}
+
+void Buzzer_Start(uint32_t freq_hz)
+{
+    if (freq_hz == 0) { Buzzer_Stop(); return; }
+    uint32_t pwmClock = gSysClk / 64;
+    uint32_t period   = pwmClock / freq_hz;
+    if (period < 4) period = 4;
+
+    PWMGenConfigure(BUZZER_PWM_BASE, BUZZER_GEN, PWM_GEN_MODE_DOWN | PWM_GEN_MODE_NO_SYNC);
+    PWMGenPeriodSet(BUZZER_PWM_BASE, BUZZER_GEN, period);
+    PWMPulseWidthSet(BUZZER_PWM_BASE, BUZZER_OUTNUM, period / 2);
+
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, true);
+    PWMGenEnable(BUZZER_PWM_BASE, BUZZER_GEN);
+}
+
+void Buzzer_Stop(void)
+{
+    PWMOutputState(BUZZER_PWM_BASE, BUZZER_OUTBIT, false);
+}

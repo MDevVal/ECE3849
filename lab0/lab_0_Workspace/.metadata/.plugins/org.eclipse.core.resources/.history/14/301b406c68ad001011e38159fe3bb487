@@ -1,0 +1,43 @@
+#ifndef GUI_GROUP_H_
+#define GUI_GROUP_H_
+
+#include <vector>
+#include "GUI_Widget.h"
+
+class GUI_Group : public GUI_Widget {
+public:
+    GUI_Group(int x = 0, int y = 0)
+        : GUI_Widget(x, y, 0, 0) {}
+
+    void add(GUI_Widget* child) {
+        _children.push_back(child);
+        child->_parent = this;
+    }
+
+    void draw(tContext* ctx) override {
+        if (!_visible) return;
+        for (auto* w : _children) {
+            if (w->isVisible())
+                w->draw(ctx);
+        }
+    }
+
+    void moveBy(int dx, int dy) override {
+        for (auto* w : _children) {
+            w->moveBy(dx, dy);
+        }
+        _x += dx;
+        _y += dy;
+    }
+
+    void setVisible(bool v) {
+        _visible = v;
+        for (auto* w : _children)
+            w->setVisible(v);
+    }
+
+private:
+    std::vector<GUI_Widget*> _children;
+};
+
+#endif // GUI_GROUP_H_

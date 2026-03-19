@@ -1,0 +1,299 @@
+
+/**
+ * example.cpp — Cronómetro con grlib puro (control con joystick)
+ *
+ * TM4C1294XL + Crystalfontz128x128 LCD + Joystick BoosterPack MKII
+ * El joystick controla la navegación y selección:
+ *  - Izquierda / derecha  cambia foco
+ *  - Click (presionar joystick)  activa el botón enfocado
+ *
+ * Versión usando solo grlib, sin SimpleGUI.
+ *
+ * Edwin A. Rodríguez, 2025
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+extern "C" {
+#include "driverlib/fpu.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/interrupt.h"
+#include "driverlib/timer.h"
+#include "inc/hw_memmap.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "sysctl_pll.h"
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+}
+
+#include "button.h"
+#include "timerLib.h"
+#include "elapsedTime.h"
+#include "joystick.h"
+
+// ===== Configuración global =====
+static constexpr uint32_t BUTTON_TICK_MS      = 20U;
+static constexpr uint32_t DISPLAY_REFRESH_MS  = 50U;
+
+uint32_t gSystemClock = 0;
+volatile uint32_t gStopwatchMs = 0;
+volatile bool gRunning = false;
+
+// ===== Estructura para botones (grlib puro) =====
+struct Button {
+    int x, y, w, h;
+    const char* label;
+    bool focused;
+    bool pressed;
+};
+
+static Button btnStart = {8, 90, 50, 28, "PLAY", true, false};
+static Button btnReset = {70, 90, 50, 28, "RESET", false, false};
+
+// ===== Joystick =====
+static Joystick joystick(JSX, JSY, JS1);
+
+// ===== Prototipos =====
+static void configureSystemClock();
+static void initializeDisplay(tContext &context);
+static void configureTimer(Timer &timer);
+static void setupJoystick();
+
+static void drawStopwatchScreen(tContext &context, uint32_t currentMs, bool running);
+static void drawButton(tContext &context, const Button &btn);
+static void handleJoystick();
+
+static void onStartClick();
+static void onStartRelease();
+static void onResetClick();
+static void onResetRelease();
+
+// ===== MAIN =====
+int main(void)
+{
+    IntMasterDisable();
+
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    configureSystemClock();
+
+    tContext sContext;
+    initializeDisplay(sContext);
+
+    Timer timer;
+    configureTimer(timer);
+
+    elapsedMillis displayTick(timer);
+    elapsedMillis stopwatchTick(timer);
+
+    setupJoystick();
+
+    // Foco inicial
+    btnStart.focused = true;
+    btnReset.focused = false;
+
+    IntMasterEnable();
+
+    uint32_t lastDisplayedMs = static_cast<uint32_t>(-1);
+    bool lastRunning = !gRunning;
+
+    while (true) {
+        joystick.tick();
+        handleJoystick();
+
+        // Cronómetro
+        if (gRunning) {
+            uint32_t delta = stopwatchTick;
+            if (delta > 0U) {
+                gStopwatchMs += delta;
+                stopwatchTick = 0;
+            }
+        } else {
+            stopwatchTick = 0;
+        }
+
+        // Redibuja GUI
+        bool running = gRunning;
+        uint32_t currentMs = gStopwatchMs;
+        if ((currentMs != lastDisplayedMs) || (running != lastRunning) ||
+            (displayTick >= DISPLAY_REFRESH_MS)) {
+
+            drawStopwatchScreen(sContext, currentMs, running);
+            drawButton(sContext, btnStart);
+            drawButton(sContext, btnReset);
+            GrFlush(&sContext);
+
+            lastDisplayedMs = currentMs;
+            lastRunning = running;
+            displayTick = 0;
+        }
+    }
+}
+
+// ===== Configuración del sistema =====
+static void configureSystemClock()
+{
+    gSystemClock = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+        SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+}
+
+// ===== Inicialización del LCD =====
+static void initializeDisplay(tContext &context)
+{
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&context, &g_sCrystalfontz128x128);
+    GrContextFontSet(&context, &g_sFontFixed6x8);
+
+    tRectangle full = {0, 0, 127, 127};
+    GrContextForegroundSet(&context, ClrBlack);
+    GrRectFill(&context, &full);
+    GrFlush(&context);
+}
+
+// ===== Inicializa el timer base =====
+static void configureTimer(Timer &timer)
+{
+    timer.begin(gSystemClock, TIMER0_BASE);
+}
+
+// ===== Configuración de Joystick =====
+static void setupJoystick()
+{
+    joystick.setTickIntervalMs(15);
+    joystick.setDeadzone(0.10f);
+    joystick.setSmoothingAlpha(0.15f);
+    joystick.setDirectionThreshold(0.25f);
+    joystick.setDirectionHysteresis(0.20f, 12.0f);
+    joystick.begin();
+    joystick.calibrateCenter(32);
+}
+
+// ===== Lógica de navegación con Joystick =====
+static void handleJoystick()
+{
+    static bool focusOnStart = true;
+    JoystickDir dir = joystick.direction8();
+
+    // Movimiento horizontal -> cambia foco
+    if (dir == JoystickDir::E || dir == JoystickDir::W) {
+        focusOnStart = (dir == JoystickDir::W);
+        btnStart.focused = focusOnStart;
+        btnReset.focused = !focusOnStart;
+    }
+
+    // Presión del botón del joystick
+    if (joystick.wasPressed()) {
+        if (focusOnStart) {
+            btnStart.pressed = true;
+            onStartClick();
+        } else {
+            btnReset.pressed = true;
+            onResetClick();
+        }
+    }
+
+    if (joystick.wasReleased()) {
+        if (focusOnStart) {
+            btnStart.pressed = false;
+            onStartRelease();
+        } else {
+            btnReset.pressed = false;
+            onResetRelease();
+        }
+    }
+}
+
+// ===== Dibuja cronómetro =====
+static void drawStopwatchScreen(tContext &context, uint32_t currentMs, bool running)
+{
+    tRectangle rectFull = {0, 0, 127, 127};
+    GrContextForegroundSet(&context, ClrBlack);
+    GrRectFill(&context, &rectFull);
+
+    uint32_t hour = currentMs / 3600000UL;
+    uint32_t minute = (currentMs / 60000UL) % 60UL;
+    uint32_t second = (currentMs / 1000UL) % 60UL;
+    uint32_t millisecond = currentMs % 1000UL;
+    if (hour > 99U) hour = 99U;
+
+    char str[20];
+    snprintf(str, sizeof(str), "%02u:%02u:%02u:%03u",
+             hour, minute, second, millisecond);
+
+    uint32_t screenW = GrContextDpyWidthGet(&context);
+    uint32_t screenH = GrContextDpyHeightGet(&context);
+
+    GrContextForegroundSet(&context, running ? ClrYellow : ClrOlive);
+    GrStringDrawCentered(&context, str, -1, screenW / 2, screenH / 2 - 10, false);
+
+    GrContextForegroundSet(&context, running ? ClrGreen : ClrRed);
+    GrStringDrawCentered(&context, running ? "RUNNING" : "STOPPED",
+                         -1, screenW / 2, screenH / 2 + 10, false);
+}
+
+// ===== Dibuja un botón con grlib =====
+static void drawButton(tContext &context, const Button &btn)
+{
+    // Colores basados en estado
+    uint16_t bgColor, textColor, borderColor;
+
+    if (btn.pressed) {
+        bgColor = ClrDarkGray;  // Gris oscuro para pressed
+        textColor = ClrBlack;
+        borderColor = ClrBlack;
+    } else if (btn.focused) {
+        bgColor = ClrLemonChiffon;  // Para focused
+        textColor = ClrDarkBlue;
+        borderColor = ClrTeal;
+    } else {
+        bgColor = ClrLightGray;  // Gris claro para normal
+        textColor = ClrDarkBlue;
+        borderColor = ClrBlack;
+    }
+
+    // Dibujar fondo
+    GrContextForegroundSet(&context, bgColor);
+    tRectangle rect = {btn.x, btn.y, btn.x + btn.w - 1, btn.y + btn.h - 1};
+    GrRectFill(&context, &rect);
+
+    // Dibujar borde
+    GrContextForegroundSet(&context, borderColor);
+    GrRectDraw(&context, &rect);
+
+    // Dibujar texto centrado
+    GrContextForegroundSet(&context, textColor);
+    int centerX = btn.x + btn.w / 2;
+    int centerY = btn.y + btn.h / 2;
+    GrStringDrawCentered(&context, btn.label, -1, centerX, centerY, false);
+}
+
+// ===== Callbacks =====
+static void onStartClick()
+{
+    gRunning = !gRunning;
+    btnStart.label = gRunning ? "PAUSE" : "PLAY";
+}
+
+static void onStartRelease()
+{
+    // Feedback opcional al soltar
+}
+
+static void onResetClick()
+{
+    gStopwatchMs = 0;
+    gRunning = false;
+    btnStart.label = "PLAY";
+}
+
+static void onResetRelease()
+{
+    // Feedback opcional
+}

@@ -1,0 +1,99 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+extern "C" {
+#include "driverlib/fpu.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/interrupt.h"
+#include "inc/hw_memmap.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "lvgl.h"
+}
+
+#include "lv_port_disp_tm4c.h"
+#include "sysctl_pll.h"
+
+// Tus librerías C++
+#include "Timer.h"
+#include "elapsedTime.h"
+
+static uint32_t gSystemClock = 120000000;
+
+int main()
+{
+    // FPU
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    // Reloj a 120 MHz
+    (void)SysCtlClockFreqSet(SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                             SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480, 120000000);
+    gSystemClock = SysCtlFrequencyGet(25000000U);
+
+    // LVGL init + display
+    lv_init();
+    lv_port_disp_init();
+
+    // Timer backend (32-bit) para medir tiempo sin ISR
+    Timer t;
+    t.begin(gSystemClock, TIMER0_BASE);
+
+    // Medidores de tiempo
+    elapsedMillis emTick(t);     // para lv_tick_inc
+    elapsedMillis emUi(t);       // para lv_timer_handler
+    elapsedMillis emCounter(t);  // para actualizar contador
+
+    // Pantalla raíz con fondo opaco negro
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    // UI: label estático
+    lv_obj_t *label = lv_label_create(scr);
+    lv_label_set_text(label, "Hello LVGL!\nTM4C1294XL");
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFF00), 0);
+
+    // UI: contador
+    lv_obj_t *counter_label = lv_label_create(scr);
+    lv_label_set_text(counter_label, "Count: 0");
+    lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, 10);
+    lv_obj_set_style_text_color(counter_label, lv_color_hex(0x00FF00), 0);
+
+    // Botón de ejemplo
+    lv_obj_t *btn = lv_button_create(scr);
+    lv_obj_set_size(btn, 80, 30);
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_t *btn_label = lv_label_create(btn);
+    lv_label_set_text(btn_label, "Button");
+    lv_obj_center(btn_label);
+
+    uint32_t counter = 0;
+    char buf[32];
+
+    for(;;) {
+        // Tick de LVGL cada 1 ms (sin ISR)
+        if (emTick >= 1) {
+            // Maneja posibles acumulaciones si hubo retraso
+            uint64_t dt = (uint64_t)emTick;
+            // incrementar por cada ms transcurrido
+            while (dt--) lv_tick_inc(1);
+            emTick = 0;
+        }
+
+        // Ejecuta el motor de LVGL cada ~5 ms (ajustable)
+        if (emUi >= 5) {
+            lv_timer_handler();
+            emUi = 0;
+        }
+
+        // Actualiza contador cada 500 ms
+        if (emCounter >= 500) {
+            counter++;
+            snprintf(buf, sizeof(buf), "Count: %lu", (unsigned long)counter);
+            lv_label_set_text(counter_label, buf);
+            emCounter = 0;
+        }
+    }
+}

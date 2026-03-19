@@ -1,0 +1,302 @@
+/**
+ * main.cpp — 8-Band Linear Spectrum Analyzer (Goertzel, 8 kHz, Stabilized Blue Neon)
+ *
+ * Features:
+ *   - 8 bands (100–3000 Hz, optimized for electret mic)
+ *   - Linear scale (no dB)
+ *   - Strong HPF + simple LPF (noise reduction)
+ *   - Periodic reset to prevent DC buildup
+ *   - No windowing (flat response)
+ *   - Blue-Neon visualization (dark blue → cyan)
+ *
+ * Author: Edwin A. Rodríguez, 2025
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+#include <string.h>
+
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/fpu.h"
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/pin_map.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "timerLib.h"
+}
+
+#include "elapsedTime.h"
+
+// ============================================================================
+// Globals
+// ============================================================================
+tContext gContext;
+uint32_t gSysClk;
+Timer timer;
+elapsedMicros sampleTimer(timer);
+elapsedMillis drawTimer(timer);
+elapsedMillis resetTimer(timer);  // periodic reset for filters
+
+// ============================================================================
+// ADC (Microphone PE5 → AIN8)
+// ============================================================================
+#define MIC_ADC_BASE      ADC0_BASE
+#define MIC_ADC_SEQ       3
+#define MIC_ADC_CHANNEL   ADC_CTL_CH8  // PE5 → AIN8
+
+void ADC_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_5);
+
+    ADCSequenceConfigure(ADC0_BASE, MIC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, MIC_ADC_SEQ, 0,
+                             MIC_ADC_CHANNEL | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, MIC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, MIC_ADC_SEQ);
+}
+
+uint16_t Mic_Read(void)
+{
+    uint32_t value;
+    ADCProcessorTrigger(MIC_ADC_BASE, MIC_ADC_SEQ);
+    while (!ADCIntStatus(MIC_ADC_BASE, MIC_ADC_SEQ, false));
+    ADCIntClear(MIC_ADC_BASE, MIC_ADC_SEQ);
+    ADCSequenceDataGet(MIC_ADC_BASE, MIC_ADC_SEQ, &value);
+    return (uint16_t)value;
+}
+
+// ============================================================================
+// LCD
+// ============================================================================
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0));
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);
+}
+
+// ============================================================================
+// Spectrum Analyzer — 8 kHz, 8 Bands, Linear Scale
+// ============================================================================
+#define FS_HZ_SPECT 8000
+#define N_FRAME     256
+
+static const float kBandHz[8] = { 100, 160, 250, 400, 650, 1000, 1600, 3000 };
+
+struct Goertzel { float coeff, s1, s2; };
+Goertzel gz[8];
+
+int16_t specBuf[N_FRAME];
+uint16_t specIdx = 0;
+
+float specSmooth[8];
+float specHPF_y = 0.0f, specHPF_prev = 0.0f;
+float prevMic = 0.0f;
+
+// ============================================================================
+// Filters
+// ============================================================================
+inline float dc_block(float x)
+{
+    float y = (0.97f * specHPF_y) + (x - specHPF_prev);
+    specHPF_y = y; specHPF_prev = x;
+    return y;
+}
+
+// ============================================================================
+// Init
+// ============================================================================
+void Spectrum_Init(void)
+{
+    for (int i = 0; i < 8; i++) {
+        float omega = 2.0f * M_PI * (kBandHz[i] / FS_HZ_SPECT);
+        gz[i].coeff = 2.0f * cosf(omega);
+        gz[i].s1 = gz[i].s2 = 0.0f;
+        specSmooth[i] = 0.0f;
+    }
+    specIdx = 0;
+    prevMic = 0.0f;
+    specHPF_y = specHPF_prev = 0.0f;
+    resetTimer = 0;
+}
+
+// ============================================================================
+// Sampling Tick — precise 8 kHz via elapsedMicros
+// ============================================================================
+void Spectrum_SampleTick(void)
+{
+    const uint32_t SAMPLE_PERIOD_US = 125;  // 8 kHz
+    static uint32_t microAccum = 0;
+
+    if (sampleTimer < SAMPLE_PERIOD_US) return;
+    microAccum += sampleTimer;
+    sampleTimer = 0;
+
+    while (microAccum >= SAMPLE_PERIOD_US)
+    {
+        microAccum -= SAMPLE_PERIOD_US;
+
+        uint16_t raw = Mic_Read();
+        float v = (float)raw / 4095.0f;
+        float x = v - 0.5f;
+
+        // Noise-reduction filters
+        float y = dc_block(x);                           // HPF
+        float micFiltered = 0.90f * prevMic + 0.10f * y; // LPF faster response
+        prevMic = micFiltered;
+
+        specBuf[specIdx++] = (int16_t)(micFiltered * 32767.0f);
+        if (specIdx >= N_FRAME) specIdx = 0;
+    }
+
+    // Periodic reset to prevent drift
+    if (resetTimer >= 1000) {
+        prevMic = 0;
+        specHPF_y = specHPF_prev = 0;
+        resetTimer = 0;
+    }
+}
+
+// ============================================================================
+// Goertzel Processing — No window
+// ============================================================================
+void Spectrum_ProcessFrame(void)
+{
+    int16_t local[N_FRAME];
+    uint16_t idx = specIdx;
+    for (int i = 0; i < N_FRAME; i++) {
+        local[i] = specBuf[idx++];
+        if (idx >= N_FRAME) idx = 0;
+    }
+
+    for (int k = 0; k < 8; k++) gz[k].s1 = gz[k].s2 = 0.0f;
+
+    for (int n = 0; n < N_FRAME; n++) {
+        float x = local[n] / 32768.0f;  // no window
+        for (int k = 0; k < 8; k++) {
+            float s = x + gz[k].coeff * gz[k].s1 - gz[k].s2;
+            gz[k].s2 = gz[k].s1;
+            gz[k].s1 = s;
+        }
+    }
+
+    for (int k = 0; k < 8; k++) {
+        float s1 = gz[k].s1, s2 = gz[k].s2, c = gz[k].coeff;
+        float power = s1*s1 + s2*s2 - c*s1*s2;
+        if (power < 1e-10f) power = 1e-10f;
+
+        float mag = sqrtf(power) * 20.0f;  // sensitivity
+        if (mag > 1.0f) mag = 1.0f;
+
+        // Soft compression + smoothing
+        mag = powf(mag, 0.85f);
+        specSmooth[k] = 0.93f * specSmooth[k] + 0.07f * mag;
+    }
+
+    // Reset Goertzel states every frame to prevent buildup
+    for (int k = 0; k < 8; k++) {
+        gz[k].s1 = gz[k].s2 = 0.0f;
+    }
+}
+
+// ============================================================================
+// Blue Neon Color (dark → cyan)
+// ============================================================================
+uint32_t BlueNeonColor(float frac)
+{
+    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    uint8_t r = (uint8_t)(20 + 60 * frac);
+    uint8_t g = (uint8_t)(80 + 170 * frac);
+    uint8_t b = 255;
+    return (r << 16) | (g << 8) | b;
+}
+
+// ============================================================================
+// Draw
+// ============================================================================
+void Draw_Spectrum(void)
+{
+    tRectangle bg = {0, 0, 127, 127};
+    GrContextForegroundSet(&gContext, ClrBlack);
+    GrRectFill(&gContext, &bg);
+
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrStringDrawCentered(&gContext, "Blue Neon Spectrum (8k)", -1, 64, 8, false);
+
+    const int barBottom = 120, barTop = 30, h = barBottom - barTop;
+    const int barW = 10, step = 14, startX = 8;
+
+    for (int i = 0; i < 8; i++) {
+        float lvl = specSmooth[i];
+        if (lvl < 0) lvl = 0; if (lvl > 1) lvl = 1;
+        int filled = (int)(lvl * h);
+        int yStart = barBottom - filled;
+
+        // outline
+        tRectangle outline = {startX + i*step - 1, barTop - 1,
+                              startX + i*step + barW + 1, barBottom + 1};
+        GrContextForegroundSet(&gContext, ClrDarkBlue);
+        GrRectDraw(&gContext, &outline);
+
+        for (int y = barBottom; y > yStart; y--) {
+            float frac = (float)(barBottom - y) / (float)h;
+            uint32_t c = BlueNeonColor(frac);
+            GrContextForegroundSet(&gContext, c);
+            GrLineDrawH(&gContext, startX + i*step,
+                        startX + i*step + barW, y);
+        }
+
+        char txt[8];
+        snprintf(txt, sizeof(txt), "%d", (int)kBandHz[i]);
+        GrContextForegroundSet(&gContext, ClrCyan);
+        GrStringDrawCentered(&gContext, txt, -1,
+                             startX + i*step + barW/2, 124, false);
+    }
+
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                                  SYSCTL_USE_PLL | SYSCTL_CFG_VCO_240),
+                                  120000000);
+
+    LCD_Init();
+    ADC_Init();
+    timer.begin(gSysClk, TIMER1_BASE);
+    Spectrum_Init();
+
+    GrContextForegroundSet(&gContext, ClrCyan);
+    GrStringDrawCentered(&gContext, "Blue Neon Analyzer (8k)", -1, 64, 64, false);
+    GrFlush(&gContext);
+
+    while (1)
+    {
+        Spectrum_SampleTick();  // 8 kHz sampling
+        if (drawTimer >= 50) {  // ~20 FPS
+            Spectrum_ProcessFrame();
+            Draw_Spectrum();
+            drawTimer = 0;
+        }
+    }
+}

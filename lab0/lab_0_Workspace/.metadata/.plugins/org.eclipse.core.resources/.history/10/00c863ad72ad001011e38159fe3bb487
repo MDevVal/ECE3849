@@ -1,0 +1,93 @@
+#ifndef GUI_BUTTON_H_
+#define GUI_BUTTON_H_
+
+#include <stdint.h>
+#include <stdbool.h>
+
+extern "C" {
+#include "grlib/grlib.h"
+}
+
+#ifdef __cplusplus
+#include "button.h"
+
+// ==========================================================
+// Estructura de tema personalizado
+// ==========================================================
+struct GUI_CustomTheme {
+    uint32_t colorNormal;
+    uint32_t colorPressed;
+    uint32_t textColor;
+    uint32_t colorFocused;
+    uint32_t borderFocused;
+};
+
+// ==========================================================
+// Enumeracin de temas predefinidos
+// ==========================================================
+enum class GUI_Theme {
+    Light,
+    Dark,
+    Blue,
+    Green,
+    Red,
+    Orange,
+    Custom
+};
+
+// ==========================================================
+// Clase GUI_Button  modo fsico y modo virtual con foco
+// ==========================================================
+class GUI_Button {
+public:
+    typedef void (*callbackFunction)(void);
+
+    GUI_Button(int x, int y, int w, int h, const char* label);
+    void draw(tContext* ctx);
+
+    // Configuracin
+    void setLabel(const char* text);
+    void setTheme(GUI_Theme theme);
+    void setColors(uint32_t normal, uint32_t pressed, uint32_t text = 0);
+    void setCustomTheme(uint32_t normal, uint32_t pressed, uint32_t text,
+                        uint32_t focused, uint32_t borderFocused);
+    void setCustomTheme(const GUI_CustomTheme& theme);
+    void attachButton(Button* physicalButton);
+    void setOnClick(callbackFunction fn);
+    void setOnClick(callbackFunction fn);
+    void setOnRelease(callbackReleaseFunction fn);
+
+    // Estado
+    void setPressed(bool p);
+    bool isPressed() const;
+    void setFocused(bool f);
+    void toggleFocus();
+    bool isFocused() const;
+
+    // Interaccin virtual
+    void press();     // simula pulsar
+    void release();   // simula soltar
+    void click();     // simula clic completo
+    void handleInput(bool selectPressed); // navegacin: ENTER o joystick
+
+private:
+    int _x, _y, _w, _h;
+    const char* _label;
+    bool _pressed;
+    bool _focused;
+    callbackFunction _onClick;
+    callbackReleaseFunction _onRelease;
+    Button* _linkedButton;
+
+    uint32_t _colorNormal;
+    uint32_t _colorPressed;
+    uint32_t _colorFocused;
+    uint32_t _borderFocused;
+    uint32_t _textColor;
+
+    void updateFromButton();
+    void applyTheme(GUI_Theme theme);
+};
+
+#endif // __cplusplus
+#endif // GUI_BUTTON_H_

@@ -1,0 +1,25 @@
+
+**** Build of configuration Debug for project LVGL9_4 ****
+
+"C:\\ti\\ccs1281\\ccs\\utils\\bin\\gmake" -k -j 16 all -O 
+ 
+Building file: "../main.cpp"
+Invoking: Arm Compiler
+"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me -O1 --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/lvgl" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/lvgl/src" --include_path="C:/Users/ear-1/lab_workspace_noRTOS/LVGL9_4" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/HAL_TM4C1294" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/timer" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/buttonsDriver" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/joystickDriver" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/elapsedTime" --include_path="C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/include" --define=ccs="ccs" --define=PART_TM4C1294NCPDT --define=TARGET_IS_TM4C129_RA1 -g --c99 --gcc --diag_warning=225 --diag_wrap=off --display_error_number --gen_func_subsections=on --abi=eabi --ual --preproc_with_compile --preproc_dependency="main.d_raw"  "../main.cpp"
+"C:\Users\ear-1\OneDrive - Worcester Polytechnic Institute (wpi.edu)\Phd\ECE3849\New Documents\libraries\lvgl\src\drivers\uefi/lv_uefi_context.h", line 71: warning #1-D: last line of file ends without a newline
+"C:\Users\ear-1\OneDrive - Worcester Polytechnic Institute (wpi.edu)\Phd\ECE3849\New Documents\libraries\lvgl\src\drivers\uefi/lv_uefi_indev.h", line 108: warning #1-D: last line of file ends without a newline
+"C:\Users\ear-1\OneDrive - Worcester Polytechnic Institute (wpi.edu)\Phd\ECE3849\New Documents\libraries\lvgl\src\drivers\uefi/lv_uefi_display.h", line 65: warning #1-D: last line of file ends without a newline
+"../main.cpp", line 61: warning #179-D: function "LED_Toggle" was declared but never referenced
+Finished building: "../main.cpp"
+ 
+Building target: "LVGL9_4.out"
+Invoking: Arm Linker
+Flags: -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me -O1 --define=ccs="ccs" --define=PART_TM4C1294NCPDT --define=TARGET_IS_TM4C129_RA1 -g --c99 --gcc --diag_warning=225 --diag_wrap=off --display_error_number --gen_func_subsections=on --abi=eabi --ual -z -m"blinky_ccs.map" --heap_size=0 --stack_size=2048 -i"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/lib" -i"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="LVGL9_4_linkInfo.xml" --rom_model
+"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armcl" -@"ccsLinker.opt" -o "LVGL9_4.out"
+<Linking>
+Finished building target: "LVGL9_4.out"
+ 
+"C:/ti/ccs1281/ccs/utils/tiobj2bin/tiobj2bin" "LVGL9_4.out" "LVGL9_4.bin" "C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armofd" "C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armhex" "C:/ti/ccs1281/ccs/utils/tiobj2bin/mkhex4bin"
+ 
+
+**** Build Finished ****

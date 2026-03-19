@@ -1,0 +1,30 @@
+
+**** Build of configuration Debug for project lab_0 ****
+
+"C:\\ti\\ccs1281\\ccs\\utils\\bin\\gmake" -k -j 16 all -O 
+ 
+Building file: "../main.cpp"
+Invoking: Arm Compiler
+"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/buttonsDriver" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/HAL_TM4C1294" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/joystickDriver" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295/inc" --include_path="C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295/utils" --include_path="C:/Users/ear-1/lab_workspace_noRTOS/lab_0" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295/driverlib" --include_path="C:/ti/TivaWare_C_Series-2.2.0.295/grlib" --include_path="C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/include" --define=ccs="ccs" --define=PART_TM4C1294NCPDT -g --c99 --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi --preproc_with_compile --preproc_dependency="main.d_raw"  "../main.cpp"
+Finished building: "../main.cpp"
+ 
+Building target: "lab_0.out"
+Invoking: Arm Linker
+"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/bin/armcl" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me --define=ccs="ccs" --define=PART_TM4C1294NCPDT -g --c99 --gcc --diag_warning=225 --diag_wrap=off --display_error_number --abi=eabi -z -m"lab_0.map" --heap_size=0 --stack_size=512 -i"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/lib" -i"C:/ti/ccs1281/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/include" --reread_libs --diag_wrap=off --display_error_number --warn_sections --xml_link_info="lab_0_linkInfo.xml" --rom_model -o "lab_0.out" "./Crystalfontz128x128_ST7735.obj" "./HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.obj" "./main.obj" "./sysctl_pll.obj" "./tm4c1294ncpdt_startup_ccs.obj" "./libraries/buttonsDriver/button.obj" "./libraries/joystickDriver/joystick.obj" "../tm4c1294ncpdt.cmd"  -llibc.a -l"C:/ti/TivaWare_C_Series-2.2.0.295/driverlib/ccs/Debug/driverlib.lib" -l"C:/ti/TivaWare_C_Series-2.2.0.295/grlib/ccs/Debug/grlib.lib" 
+<Linking>
+ 
+ undefined first referenced
+  symbol       in file     
+ --------- ----------------
+ usnprintf ./main.obj      
+ 
+error #10234-D: unresolved symbols remain
+error #10010: errors encountered during linking; "lab_0.out" not built
+ 
+>> Compilation failure
+makefile:147: recipe for target 'lab_0.out' failed
+gmake[1]: *** [lab_0.out] Error 1
+makefile:143: recipe for target 'all' failed
+gmake: *** [all] Error 2
+
+**** Build Finished ****

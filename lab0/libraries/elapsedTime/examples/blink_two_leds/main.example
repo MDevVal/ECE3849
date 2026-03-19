@@ -1,0 +1,216 @@
+/**
+ * main.cpp — OPT3001 Lux Meter with LED heartbeat (elapsedMillis)
+ * Compatible with EK-TM4C1294XL and your Timer/elapsedTime utilities.
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/i2c.h"
+#include "driverlib/fpu.h"
+#include "driverlib/interrupt.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "sysctl_pll.h"
+}
+
+#include "Timer.h"
+#include "elapsedTime.h"
+
+// ========== OPT3001 Definitions ==========
+#define OPT3001_ADDR        0x44
+#define OPT3001_REG_RESULT  0x00
+#define OPT3001_REG_CONFIG  0x01
+
+// ========== Hardware Configuration ==========
+static constexpr uint32_t LED_PORT = GPIO_PORTN_BASE;
+static constexpr uint8_t  LED1_PIN = GPIO_PIN_1; // D1 (green)
+static constexpr uint8_t  LED2_PIN = GPIO_PIN_0; // D2 (blue)
+
+// ========== Function Prototypes ==========
+static void I2C0_Init(void);
+static void I2C0_Wait(void);
+static void OPT3001_Init(void);
+static uint16_t OPT3001_Read16(uint8_t reg);
+static void OPT3001_Write16(uint8_t reg, uint16_t value);
+static float OPT3001_ReadLux(void);
+static void DrawLux(tContext *ctx, float lux);
+static void LED_Init(void);
+static void LED_Write(uint8_t mask, bool on);
+
+// =====================================================
+//                      MAIN
+// =====================================================
+int main(void)
+{
+    // FPU & clock setup
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    uint32_t sysclk = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+        SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480, 120000000);
+    if (sysclk == 0) sysclk = 120000000;
+
+    // Initialize peripherals
+    LED_Init();
+    I2C0_Init();
+    OPT3001_Init();
+
+    // Initialize display
+    tContext sContext;
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&sContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&sContext, &g_sFontFixed6x8);
+
+    // Setup Timer + elapsedMillis
+    Timer timer;
+    timer.begin(sysclk, TIMER0_BASE);
+
+    elapsedMillis ledElapsed(timer);
+    elapsedMillis luxElapsed(timer);
+
+    bool ledState = false;
+
+    // ===== Main Loop =====
+    while (true) {
+        // Blink LED every 500 ms
+        if (ledElapsed >= 500) {
+            ledState = !ledState;
+            LED_Write(LED1_PIN, ledState);
+            ledElapsed = 0;
+        }
+
+        // Read and display lux every 1 s
+        if (luxElapsed >= 1000) {
+            float lux = OPT3001_ReadLux();
+            DrawLux(&sContext, lux);
+            luxElapsed = 0;
+        }
+    }
+}
+
+// =====================================================
+//                 LED control
+// =====================================================
+static void LED_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION)) {}
+    GPIOPinTypeGPIOOutput(LED_PORT, LED1_PIN | LED2_PIN);
+    GPIOPinWrite(LED_PORT, LED1_PIN | LED2_PIN, 0);
+}
+
+static void LED_Write(uint8_t mask, bool on)
+{
+    GPIOPinWrite(LED_PORT, mask, on ? mask : 0);
+}
+
+// =====================================================
+//                 I2C + OPT3001
+// =====================================================
+static void I2C0_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_I2C0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOB);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_I2C0));
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPIOB));
+
+    GPIOPinConfigure(GPIO_PB2_I2C0SCL);
+    GPIOPinConfigure(GPIO_PB3_I2C0SDA);
+    GPIOPinTypeI2CSCL(GPIO_PORTB_BASE, GPIO_PIN_2);
+    GPIOPinTypeI2C(GPIO_PORTB_BASE, GPIO_PIN_3);
+
+    SysCtlPeripheralReset(SYSCTL_PERIPH_I2C0);
+    I2CMasterInitExpClk(I2C0_BASE, SysCtlClockGet(), false); // 100 kHz
+}
+
+static void I2C0_Wait(void)
+{
+    while (I2CMasterBusy(I2C0_BASE));
+}
+
+static void OPT3001_Write16(uint8_t reg, uint16_t value)
+{
+    I2CMasterSlaveAddrSet(I2C0_BASE, OPT3001_ADDR, false);
+    I2CMasterDataPut(I2C0_BASE, reg);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+    I2C0_Wait();
+
+    I2CMasterDataPut(I2C0_BASE, (value >> 8) & 0xFF);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_CONT);
+    I2C0_Wait();
+
+    I2CMasterDataPut(I2C0_BASE, value & 0xFF);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_SEND_FINISH);
+    I2C0_Wait();
+}
+
+static uint16_t OPT3001_Read16(uint8_t reg)
+{
+    uint16_t val = 0;
+
+    I2CMasterSlaveAddrSet(I2C0_BASE, OPT3001_ADDR, false);
+    I2CMasterDataPut(I2C0_BASE, reg);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_SINGLE_SEND);
+    I2C0_Wait();
+
+    I2CMasterSlaveAddrSet(I2C0_BASE, OPT3001_ADDR, true);
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_RECEIVE_START);
+    I2C0_Wait();
+    val = (I2CMasterDataGet(I2C0_BASE) << 8);
+
+    I2CMasterControl(I2C0_BASE, I2C_MASTER_CMD_BURST_RECEIVE_FINISH);
+    I2C0_Wait();
+    val |= I2CMasterDataGet(I2C0_BASE);
+
+    return val;
+}
+
+static void OPT3001_Init(void)
+{
+    uint16_t config = 0xC410; // continuous conversions, 800ms, auto-range
+    OPT3001_Write16(OPT3001_REG_CONFIG, config);
+    SysCtlDelay(1000000);
+}
+
+static float OPT3001_ReadLux(void)
+{
+    uint16_t raw = OPT3001_Read16(OPT3001_REG_RESULT);
+    uint16_t exp = (raw >> 12) & 0x0F;
+    uint16_t mant = raw & 0x0FFF;
+    return mant * (0.01f * (1 << exp));
+}
+
+// =====================================================
+//                Display drawing
+// =====================================================
+static void DrawLux(tContext *ctx, float lux)
+{
+    tRectangle rect = {0, 0,
+        (int16_t)(GrContextDpyWidthGet(ctx) - 1),
+        (int16_t)(GrContextDpyHeightGet(ctx) - 1)};
+    GrContextForegroundSet(ctx, ClrBlack);
+    GrRectFill(ctx, &rect);
+
+    GrContextForegroundSet(ctx, ClrCyan);
+    GrStringDrawCentered(ctx, "OPT3001 LUX METER", -1,
+                         GrContextDpyWidthGet(ctx)/2, 20, false);
+
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Lux: %.2f", lux);
+    GrContextForegroundSet(ctx, ClrYellow);
+    GrStringDrawCentered(ctx, buf, -1,
+                         GrContextDpyWidthGet(ctx)/2, 64, false);
+
+    GrFlush(ctx);
+}

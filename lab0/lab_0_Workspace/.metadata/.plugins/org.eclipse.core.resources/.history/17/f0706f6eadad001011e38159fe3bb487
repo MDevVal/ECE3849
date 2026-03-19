@@ -1,0 +1,62 @@
+################################################################################
+# Automatically-generated file. Do not edit!
+################################################################################
+
+SHELL = cmd.exe
+
+# Add inputs and outputs from these tool invocations to the build variables 
+C_SRCS += \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/croutine.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/event_groups.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/list.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/queue.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/stream_buffer.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/tasks.c \
+C:/Users/ear-1/OneDrive\ -\ Worcester\ Polytechnic\ Institute\ (wpi.edu)/Phd/ECE3849/New\ Documents/libraries/freeRTOS/FreeRTOS/timers.c 
+
+C_DEPS += \
+./libraries/FreeRTOS/croutine.d \
+./libraries/FreeRTOS/event_groups.d \
+./libraries/FreeRTOS/list.d \
+./libraries/FreeRTOS/queue.d \
+./libraries/FreeRTOS/stream_buffer.d \
+./libraries/FreeRTOS/tasks.d \
+./libraries/FreeRTOS/timers.d 
+
+OBJS += \
+./libraries/FreeRTOS/croutine.obj \
+./libraries/FreeRTOS/event_groups.obj \
+./libraries/FreeRTOS/list.obj \
+./libraries/FreeRTOS/queue.obj \
+./libraries/FreeRTOS/stream_buffer.obj \
+./libraries/FreeRTOS/tasks.obj \
+./libraries/FreeRTOS/timers.obj 
+
+OBJS__QUOTED += \
+"libraries\FreeRTOS\croutine.obj" \
+"libraries\FreeRTOS\event_groups.obj" \
+"libraries\FreeRTOS\list.obj" \
+"libraries\FreeRTOS\queue.obj" \
+"libraries\FreeRTOS\stream_buffer.obj" \
+"libraries\FreeRTOS\tasks.obj" \
+"libraries\FreeRTOS\timers.obj" 
+
+C_DEPS__QUOTED += \
+"libraries\FreeRTOS\croutine.d" \
+"libraries\FreeRTOS\event_groups.d" \
+"libraries\FreeRTOS\list.d" \
+"libraries\FreeRTOS\queue.d" \
+"libraries\FreeRTOS\stream_buffer.d" \
+"libraries\FreeRTOS\tasks.d" \
+"libraries\FreeRTOS\timers.d" 
+
+C_SRCS__QUOTED += \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/croutine.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/event_groups.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/list.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/queue.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/stream_buffer.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/tasks.c" \
+"C:/Users/ear-1/OneDrive - Worcester Polytechnic Institute (wpi.edu)/Phd/ECE3849/New Documents/libraries/freeRTOS/FreeRTOS/timers.c" 
+
+

@@ -1,0 +1,73 @@
+################################################################################
+# Automatically-generated file. Do not edit!
+################################################################################
+
+SHELL = cmd.exe
+
+# Add inputs and outputs from these tool invocations to the build variables 
+CPP_SRCS += \
+../OPT3001.cpp \
+../main.cpp 
+
+CMD_SRCS += \
+../blinky_ccs.cmd 
+
+C_SRCS += \
+../Crystalfontz128x128_ST7735.c \
+../HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.c \
+../lv_port_disp_tm4c.c \
+../startup_ccs.c \
+../sysctl_pll.c 
+
+C_DEPS += \
+./Crystalfontz128x128_ST7735.d \
+./HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.d \
+./lv_port_disp_tm4c.d \
+./startup_ccs.d \
+./sysctl_pll.d 
+
+OBJS += \
+./Crystalfontz128x128_ST7735.obj \
+./HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.obj \
+./OPT3001.obj \
+./lv_port_disp_tm4c.obj \
+./main.obj \
+./startup_ccs.obj \
+./sysctl_pll.obj 
+
+CPP_DEPS += \
+./OPT3001.d \
+./main.d 
+
+OBJS__QUOTED += \
+"Crystalfontz128x128_ST7735.obj" \
+"HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.obj" \
+"OPT3001.obj" \
+"lv_port_disp_tm4c.obj" \
+"main.obj" \
+"startup_ccs.obj" \
+"sysctl_pll.obj" 
+
+C_DEPS__QUOTED += \
+"Crystalfontz128x128_ST7735.d" \
+"HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.d" \
+"lv_port_disp_tm4c.d" \
+"startup_ccs.d" \
+"sysctl_pll.d" 
+
+CPP_DEPS__QUOTED += \
+"OPT3001.d" \
+"main.d" 
+
+C_SRCS__QUOTED += \
+"../Crystalfontz128x128_ST7735.c" \
+"../HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.c" \
+"../lv_port_disp_tm4c.c" \
+"../startup_ccs.c" \
+"../sysctl_pll.c" 
+
+CPP_SRCS__QUOTED += \
+"../OPT3001.cpp" \
+"../main.cpp" 
+
+

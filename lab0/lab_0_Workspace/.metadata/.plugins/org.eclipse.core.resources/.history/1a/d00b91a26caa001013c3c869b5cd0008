@@ -1,0 +1,143 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+extern "C" {
+#include "driverlib/fpu.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/interrupt.h"
+#include "driverlib/gpio.h"
+#include "inc/hw_memmap.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "lvgl.h"
+}
+
+#include "lv_port_disp_tm4c.h"
+#include "sysctl_pll.h"
+
+// Librerías C++
+#include "Timer.h"
+#include "elapsedTime.h"
+
+/* -------------------------------------------------------------------------- */
+/* Variables globales                                                         */
+/* -------------------------------------------------------------------------- */
+static uint32_t gSystemClock = 120000000;
+static Timer gTimer;  // fuente de tiempo para LVGL
+
+/* -------------------------------------------------------------------------- */
+/* Callback de tiempo para LVGL                                               */
+/* -------------------------------------------------------------------------- */
+static uint32_t my_tick_cb(void)
+{
+    return gTimer.millis();  // función que retorna tiempo en ms
+}
+
+/* -------------------------------------------------------------------------- */
+/* Función para inicializar LED de prueba                                     */
+/* -------------------------------------------------------------------------- */
+static void LED_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while (!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION)) {}
+    GPIOPinTypeGPIOOutput(GPIO_PORTN_BASE, GPIO_PIN_1);
+    GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, 0x00);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Toggle LED                                                                 */
+/* -------------------------------------------------------------------------- */
+static void LED_Toggle(void)
+{
+    uint8_t val = GPIOPinRead(GPIO_PORTN_BASE, GPIO_PIN_1);
+    val ^= GPIO_PIN_1;
+    GPIOPinWrite(GPIO_PORTN_BASE, GPIO_PIN_1, val);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Main principal                                                             */
+/* -------------------------------------------------------------------------- */
+int main(void)
+{
+    /* Habilita FPU */
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    /* Configura reloj a 120 MHz con PLL */
+    (void)SysCtlClockFreqSet(SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |
+                             SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480, 120000000);
+    gSystemClock = SysCtlFrequencyGet(25000000U);
+
+    /* Inicializa el backend de temporización */
+    gTimer.begin(gSystemClock, TIMER0_BASE);
+
+    /* Inicializa LED indicador */
+    LED_Init();
+
+    /* Inicializa LVGL y el display */
+    lv_init();
+    lv_port_disp_init();
+
+    /* Registra el callback de tiempo */
+    lv_tick_set_cb(my_tick_cb);
+
+    /* Pantalla raíz */
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    /* Etiqueta principal */
+    lv_obj_t *label = lv_label_create(scr);
+    lv_label_set_text(label, "Hello LVGL!\nTM4C1294XL");
+    lv_obj_align(label, LV_ALIGN_CENTER, 0, -30);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xFFFF00), 0);
+
+    /* Etiqueta de contador */
+    lv_obj_t *counter_label = lv_label_create(scr);
+    lv_label_set_text(counter_label, "Count: 0");
+    lv_obj_align(counter_label, LV_ALIGN_CENTER, 0, 10);
+    lv_obj_set_style_text_color(counter_label, lv_color_hex(0x00FF00), 0);
+
+    /* Botón de ejemplo */
+    lv_obj_t *btn = lv_button_create(scr);
+    lv_obj_set_size(btn, 80, 30);
+    lv_obj_align(btn, LV_ALIGN_CENTER, 0, 40);
+    lv_obj_t *btn_label = lv_label_create(btn);
+    lv_label_set_text(btn_label, "Button");
+    lv_obj_center(btn_label);
+
+    /* Contador lógico */
+    uint32_t counter = 0;
+    char buf[32];
+
+    /* Temporizadores de UI */
+    elapsedMillis emHandler(gTimer);
+    elapsedMillis emCounter(gTimer);
+
+    /* ---------------------------------------------------------------------- */
+    /* Bucle principal sin RTOS (tipo Arduino loop)                           */
+    /* ---------------------------------------------------------------------- */
+    while (1)
+    {
+        /* Llama al motor de LVGL cada ~5 ms */
+        if (emHandler >= 5) {
+            lv_timer_handler();
+            emHandler = 0;
+        }
+
+        /* Actualiza el contador visible cada 500 ms */
+        if (emCounter >= 500) {
+            counter++;
+            snprintf(buf, sizeof(buf), "Count: %lu", (unsigned long)counter);
+            lv_label_set_text(counter_label, buf);
+
+            /* Parpadea el LED cada actualización */
+            LED_Toggle();
+
+            emCounter = 0;
+        }
+
+        /* Pequeño retardo (~1 ms) para estabilidad */
+        //SysCtlDelay(gSystemClock / 3 / 1000);
+    }
+}

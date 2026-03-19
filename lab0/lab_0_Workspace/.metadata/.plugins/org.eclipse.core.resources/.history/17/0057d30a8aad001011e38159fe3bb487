@@ -1,0 +1,264 @@
+/**
+ * main.cpp — 8-band Extended Spectrum Analyzer (Goertzel, 16 kHz, Neon palette)
+ *
+ * Features:
+ *   - 8 extended bands up to 7.5 kHz
+ *   - Fixed reference (no auto calibration)
+ *   - Neon plasma gradient (blue→cyan→violet→pink→amber→white)
+ *   - Logarithmic dB scale (−60 to 0 dB)
+ *   - Uses TIMER1_BASE via elapsedMillis (no Timer0)
+ *
+ * Hardware:
+ *   - EK-TM4C1294XL + BoosterPack MKII
+ *   - Mic on PE5 (ADC0 AIN8)
+ *   - LCD Crystalfontz128x128 (SPI0)
+ *
+ * Author: Edwin A. Rodríguez, 2025
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <math.h>
+#include <string.h>
+
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/fpu.h"
+#include "driverlib/gpio.h"
+#include "driverlib/adc.h"
+#include "driverlib/pin_map.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "grlib/grlib.h"
+#include "timerLib.h"
+}
+
+#include "elapsedTime.h"
+
+// ============================================================================
+// Globals
+// ============================================================================
+tContext gContext;
+uint32_t gSysClk;
+Timer timer;
+elapsedMillis sampleTimer(timer);
+elapsedMillis drawTimer(timer);
+
+// ============================================================================
+// ADC (Microphone PE5 → AIN8)
+// ============================================================================
+#define MIC_ADC_BASE      ADC0_BASE
+#define MIC_ADC_SEQ       3
+#define MIC_ADC_CHANNEL   ADC_CTL_CH8  // PE5 -> AIN8
+
+void ADC_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_ADC0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOE);
+    GPIOPinTypeADC(GPIO_PORTE_BASE, GPIO_PIN_5);
+
+    ADCSequenceConfigure(ADC0_BASE, MIC_ADC_SEQ, ADC_TRIGGER_PROCESSOR, 0);
+    ADCSequenceStepConfigure(ADC0_BASE, MIC_ADC_SEQ, 0, MIC_ADC_CHANNEL | ADC_CTL_IE | ADC_CTL_END);
+    ADCSequenceEnable(ADC0_BASE, MIC_ADC_SEQ);
+    ADCIntClear(ADC0_BASE, MIC_ADC_SEQ);
+}
+
+uint16_t Mic_Read(void)
+{
+    uint32_t value;
+    ADCProcessorTrigger(MIC_ADC_BASE, MIC_ADC_SEQ);
+    while (!ADCIntStatus(MIC_ADC_BASE, MIC_ADC_SEQ, false));
+    ADCIntClear(MIC_ADC_BASE, MIC_ADC_SEQ);
+    ADCSequenceDataGet(MIC_ADC_BASE, MIC_ADC_SEQ, &value);
+    return (uint16_t)value;
+}
+
+// ============================================================================
+// LCD
+// ============================================================================
+void LCD_Init(void)
+{
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_SSI0);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOA);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOM);
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPIOD);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_SSI0));
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+    GrContextInit(&gContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&gContext, &g_sFontFixed6x8);
+}
+
+// ============================================================================
+// Spectrum Analyzer — 8 Bands, 16 kHz sampling
+// ============================================================================
+#define FS_HZ_SPECT 16000
+#define N_FRAME     256
+
+// 8 bands logarithmically spaced: 250–7500 Hz
+static const float kBandHz[8] = {250, 400, 650, 1000, 1600, 2500, 4000, 7500};
+
+struct Goertzel { float coeff, s1, s2; };
+Goertzel gz[8];
+
+int16_t specBuf[N_FRAME];
+uint16_t specIdx = 0;
+
+float specDB[8], specSmooth[8];
+float specHPF_y = 0.0f, specHPF_prev = 0.0f;
+float specRef = 1e-4f;  // fixed reference level
+
+// DC blocker
+inline float dc_block(float x) {
+    float y = (0.995f * specHPF_y) + (x - specHPF_prev);
+    specHPF_y = y; specHPF_prev = x;
+    return y;
+}
+
+void Spectrum_Init(void)
+{
+    for (int i = 0; i < 8; i++) {
+        float omega = 2.0f * M_PI * kBandHz[i] / FS_HZ_SPECT;
+        gz[i].coeff = 2.0f * cosf(omega);
+        gz[i].s1 = gz[i].s2 = 0.0f;
+        specDB[i] = -60.0f;
+        specSmooth[i] = 0.0f;
+    }
+    specIdx = 0;
+}
+
+// Sampling tick — 16 samples/ms (~16 kHz)
+void Spectrum_SampleTick(void)
+{
+    if (sampleTimer < 1) return;
+    sampleTimer = 0;
+
+    for (int i = 0; i < 16; i++) {
+        uint16_t raw = Mic_Read();
+        float v = (float)raw / 4095.0f;
+        float x = v - 0.5f;
+        float y = 1.5f * dc_block(x);
+        specBuf[specIdx++] = (int16_t)(y * 32767.0f);
+        if (specIdx >= N_FRAME) specIdx = 0;
+    }
+}
+
+// Goertzel processing
+void Spectrum_ProcessFrame(void)
+{
+    int16_t local[N_FRAME];
+    uint16_t idx = specIdx;
+    for (int i = 0; i < N_FRAME; i++) {
+        local[i] = specBuf[idx++];
+        if (idx >= N_FRAME) idx = 0;
+    }
+
+    for (int k = 0; k < 8; k++) gz[k].s1 = gz[k].s2 = 0.0f;
+
+    for (int n = 0; n < N_FRAME; n++) {
+        float w = 0.5f*(1.0f - cosf(2.0f*M_PI*n/(N_FRAME-1)));  // Hann
+        float x = (local[n]/32768.0f)*w;
+        for (int k = 0; k < 8; k++) {
+            float s = x + gz[k].coeff*gz[k].s1 - gz[k].s2;
+            gz[k].s2 = gz[k].s1;
+            gz[k].s1 = s;
+        }
+    }
+
+    for (int k = 0; k < 8; k++) {
+        float s1=gz[k].s1, s2=gz[k].s2, c=gz[k].coeff;
+        float power=s1*s1 + s2*s2 - c*s1*s2;
+        if (power<1e-12f) power=1e-12f;
+        float db=10.0f*log10f(power/specRef);
+        if (db<-60) db=-60; if (db>0) db=0;
+        specDB[k]=db;
+        float norm=(db+60.0f)/60.0f;
+        specSmooth[k]=0.85f*specSmooth[k]+0.15f*norm;
+    }
+}
+
+// Neon plasma color gradient
+uint32_t ColorFromLevel(float frac)
+{
+    if (frac < 0.2f) return 0x001FFF;       // deep blue
+    else if (frac < 0.4f) return 0x00FFFF;  // cyan
+    else if (frac < 0.6f) return 0x9900FF;  // violet
+    else if (frac < 0.8f) return 0xFF0099;  // pink
+    else if (frac < 0.95f) return 0xFF6600; // amber
+    else return 0xFFFFFF;                   // white
+}
+
+// Draw function
+void Draw_Spectrum(void)
+{
+    tRectangle bg={0,0,127,127};
+    GrContextForegroundSet(&gContext,ClrBlack);
+    GrRectFill(&gContext,&bg);
+
+    GrContextForegroundSet(&gContext,ClrWhite);
+    GrStringDrawCentered(&gContext,"Extended Spectrum (16kHz)",-1,64,8,false);
+
+    const int barBottom=120, barTop=30, h=barBottom-barTop;
+    const int barW=10, step=14, startX=8;
+
+    for(int i=0;i<8;i++){
+        float lvl=specSmooth[i];
+        if(lvl<0)lvl=0;if(lvl>1)lvl=1;
+        int filled=(int)(lvl*h);
+        int yStart=barBottom-filled;
+
+        // outline
+        tRectangle outline={startX+i*step-1,barTop-1,
+                            startX+i*step+barW+1,barBottom+1};
+        GrContextForegroundSet(&gContext,ClrGray);
+        GrRectDraw(&gContext,&outline);
+
+        // fill
+        for(int y=barBottom;y>yStart;y--){
+            float frac=(float)(barBottom-y)/(float)h;
+            uint32_t c = ColorFromLevel(frac);
+            GrContextForegroundSet(&gContext,c);
+            GrLineDrawH(&gContext,startX+i*step,startX+i*step+barW,y);
+        }
+
+        char txt[8];
+        snprintf(txt,sizeof(txt),"%d",(int)kBandHz[i]);
+        GrContextForegroundSet(&gContext,ClrGray);
+        GrStringDrawCentered(&gContext,txt,-1,startX+i*step+barW/2,124,false);
+    }
+
+    GrFlush(&gContext);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+int main(void)
+{
+    FPUEnable();
+    FPULazyStackingEnable();
+    gSysClk = SysCtlClockFreqSet((SYSCTL_XTAL_25MHZ|SYSCTL_OSC_MAIN|
+                                  SYSCTL_USE_PLL|SYSCTL_CFG_VCO_240),120000000);
+
+    LCD_Init();
+    ADC_Init();
+    timer.begin(gSysClk, TIMER1_BASE);  // safe, no Timer0
+    Spectrum_Init();
+
+    GrContextForegroundSet(&gContext,ClrYellow);
+    GrStringDrawCentered(&gContext,"Extended Spectrum",-1,64,64,false);
+    GrFlush(&gContext);
+
+    while(1)
+    {
+        Spectrum_SampleTick();     // ~16 kHz effective
+
+        if(drawTimer >= 50){       // update ~20 FPS
+            Spectrum_ProcessFrame();
+            Draw_Spectrum();
+            drawTimer = 0;
+        }
+    }
+}

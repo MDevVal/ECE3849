@@ -1,0 +1,120 @@
+/**
+ * @file lv_port_disp_tm4c.c
+ * @brief Display driver port for LVGL on EK-TM4C1294XL + Crystalfontz ST7735
+ */
+
+#include "lv_port_disp_tm4c.h"
+#include "Crystalfontz128x128_ST7735.h"
+#include "HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.h"
+#include "inc/hw_memmap.h"
+#include "driverlib/ssi.h"
+#include <stdint.h>
+#include <stdbool.h>
+
+/* -------------------------------------------------------------------------- */
+/* Configuración básica                                                       */
+/* -------------------------------------------------------------------------- */
+#define LCD_HOR_RES 128
+#define LCD_VER_RES 128
+#define BUF_LINES   16      /* número de líneas por buffer parcial */
+
+/* -------------------------------------------------------------------------- */
+/* Prototipos internos                                                        */
+/* -------------------------------------------------------------------------- */
+static void disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map);
+static void lcd_send_pixels(const uint16_t *data, uint32_t count);
+static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
+static void LCD_Clear(uint16_t color);
+
+/* -------------------------------------------------------------------------- */
+/* Buffers LVGL                                                               */
+/* -------------------------------------------------------------------------- */
+static lv_color_t buf_1[LCD_HOR_RES * BUF_LINES];
+static lv_color_t buf_2[LCD_HOR_RES * BUF_LINES];
+
+/* -------------------------------------------------------------------------- */
+/* Inicialización del driver LVGL                                             */
+/* -------------------------------------------------------------------------- */
+void lv_port_disp_init(void)
+{
+    /* Inicializa hardware */
+    HAL_LCD_PortInit();
+    HAL_LCD_SpiInit();
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+
+    /* Limpieza inicial */
+    LCD_Clear(0x0000); // negro
+
+    /* Crear display LVGL */
+    lv_display_t *disp = lv_display_create(LCD_HOR_RES, LCD_VER_RES);
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(disp, disp_flush);
+    lv_display_set_buffers(disp, buf_1, buf_2, sizeof(buf_1), LV_DISPLAY_RENDER_MODE_PARTIAL);
+}
+
+/* -------------------------------------------------------------------------- */
+/* Función de refresco (flush callback)                                       */
+/* -------------------------------------------------------------------------- */
+static void disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
+{
+    (void)disp;
+
+    /* Clampeo de coordenadas */
+    int32_t x1 = area->x1 < 0 ? 0 : area->x1;
+    int32_t y1 = area->y1 < 0 ? 0 : area->y1;
+    int32_t x2 = area->x2 >= LCD_HOR_RES ? LCD_HOR_RES - 1 : area->x2;
+    int32_t y2 = area->y2 >= LCD_VER_RES ? LCD_VER_RES - 1 : area->y2;
+
+    uint32_t w = (uint32_t)(x2 - x1 + 1);
+    uint32_t h = (uint32_t)(y2 - y1 + 1);
+
+    /* Configura ventana */
+    Crystalfontz128x128_SetDrawFrame(x1, y1, x2, y2);
+    HAL_LCD_writeCommand(CM_RAMWR);
+
+    /* LVGL entrega px_map en formato RGB565 */
+    const uint16_t *src = (const uint16_t *)px_map;
+
+    for (uint32_t row = 0; row < h; row++) {
+        for (uint32_t col = 0; col < w; col++) {
+            uint16_t color = *src++;
+            /* ST7735 espera primero MSB luego LSB */
+            HAL_LCD_writeData(color >> 8);
+            HAL_LCD_writeData(color & 0xFF);
+        }
+    }
+
+    while (SSIBusy(LCD_SSI_BASE)) {}
+    lv_display_flush_ready(disp);
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* Funciones auxiliares                                                       */
+/* -------------------------------------------------------------------------- */
+static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+    Crystalfontz128x128_SetDrawFrame(x0, y0, x1, y1);
+}
+
+static void lcd_send_pixels(const uint16_t *data, uint32_t count)
+{
+    /* Orden LSB primero (compatibilidad con HAL original) */
+    while (count--) {
+        uint16_t color = *data++;
+        HAL_LCD_writeData(color >> 8);  // MSB
+        HAL_LCD_writeData(color & 0xFF); // LSB
+    }
+}
+
+static void LCD_Clear(uint16_t color)
+{
+    lcd_set_window(0, 0, LCD_HOR_RES - 1, LCD_VER_RES - 1);
+    HAL_LCD_writeCommand(CM_RAMWR);
+    for (uint32_t i = 0; i < LCD_HOR_RES * LCD_VER_RES; i++) {
+        HAL_LCD_writeData(color >> 8);
+        HAL_LCD_writeData(color & 0xFF);
+    }
+    while (SSIBusy(LCD_SSI_BASE)) {}
+}

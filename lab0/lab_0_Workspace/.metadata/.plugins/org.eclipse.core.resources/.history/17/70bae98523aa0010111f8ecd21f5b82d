@@ -1,0 +1,252 @@
+
+/**
+ * main.c
+ *
+ * ECE 3849 Lab 0 Starter Project
+ * Gene Bogdanov    10/18/2017
+ *
+ * Stopwatch demo using elapsedTime utilities on the EK-TM4C1294XL LaunchPad.
+ */
+#define BOOSTERPACK1
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+
+extern "C" {
+    #include "driverlib/fpu.h"
+    #include "driverlib/sysctl.h"
+    #include "driverlib/interrupt.h"
+    #include "driverlib/timer.h"
+    #include "inc/hw_memmap.h"
+    #include "Crystalfontz128x128_ST7735.h"
+    #include "grlib/grlib.h"
+    #include "sysctl_pll.h"
+}
+
+#include "button.h"      // Custom button helper
+#include "Timer.h"       // Hardware timer wrapper for elapsedTime
+#include "elapsedTime.h" // elapsedMillis utilities
+
+static constexpr uint32_t BUTTON_TICK_MS      = 10U;
+static constexpr uint32_t DISPLAY_INTERVAL_MS = 16U;
+static constexpr uint32_t BUTTON_FEEDBACK_MS  = 120U;
+
+uint32_t gSystemClock = 0;           // [Hz] system clock frequency
+volatile uint32_t gStopwatchMs = 0;  // Accumulated stopwatch time in ms
+volatile bool gRunning = false;      // Stopwatch state flag
+
+static Button btnStartStop(S1);
+static Button btnReset(S2);
+
+// Feedback requests posted by the button callbacks
+static volatile bool gStartStopFeedbackRequest = false;
+static volatile bool gResetFeedbackRequest = false;
+
+static void onStartStopPress();
+static void onStartStopRelease();
+static void onResetPress();
+static void onResetRelease();
+
+int main(void)
+{
+    IntMasterDisable();
+
+    FPUEnable();
+    FPULazyStackingEnable();
+
+    SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+    gSystemClock = SysCtlFrequencyGet(25000000); // Confirm the PLL-based clock
+
+    Crystalfontz128x128_Init();
+    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
+
+    tContext sContext;
+    GrContextInit(&sContext, &g_sCrystalfontz128x128);
+    GrContextFontSet(&sContext, &g_sFontFixed6x8);
+
+    Timer timer;
+    timer.begin(gSystemClock, TIMER0_BASE);
+
+    elapsedMillis buttonTick(timer);
+    elapsedMillis displayTick(timer);
+    elapsedMillis stopwatchTick(timer);
+    elapsedMillis startStopFeedbackTimer(timer);
+    elapsedMillis resetFeedbackTimer(timer);
+
+    btnStartStop.begin();
+    btnReset.begin();
+    btnStartStop.setTickIntervalMs(BUTTON_TICK_MS);
+    btnReset.setTickIntervalMs(BUTTON_TICK_MS);
+    btnStartStop.setDebounceMs(30);
+    btnReset.setDebounceMs(30);
+    btnStartStop.setPressMs(30);
+    btnReset.setPressMs(30);
+    btnStartStop.attachPress(onStartStopPress);
+    btnStartStop.attachLongPressStop(onStartStopRelease);
+    btnReset.attachPress(onResetPress);
+    btnReset.attachLongPressStop(onResetRelease);
+
+    IntMasterEnable();
+
+    bool startStopFeedback = false;
+    bool resetFeedback = false;
+    bool lastRunning = !gRunning;
+    bool lastStartStopFeedback = false;
+    bool lastResetFeedback = false;
+    uint32_t lastDisplayedMs = static_cast<uint32_t>(-1);
+
+    tRectangle rectFullScreen = {0, 0,
+        static_cast<int16_t>(GrContextDpyWidthGet(&sContext) - 1),
+        static_cast<int16_t>(GrContextDpyHeightGet(&sContext) - 1)};
+
+    char str[16] = {0};
+
+    while (true) {
+        if (buttonTick >= BUTTON_TICK_MS) {
+            btnStartStop.tick();
+            btnReset.tick();
+            buttonTick = 0;
+        }
+
+        if (gRunning) {
+            uint32_t delta = stopwatchTick;
+            if (delta > 0U) {
+                gStopwatchMs += delta;
+                stopwatchTick = 0;
+            }
+        } else {
+            stopwatchTick = 0;
+        }
+
+        if (gStartStopFeedbackRequest) {
+            gStartStopFeedbackRequest = false;
+            startStopFeedback = true;
+            startStopFeedbackTimer = 0;
+        }
+        if (startStopFeedback && startStopFeedbackTimer >= BUTTON_FEEDBACK_MS) {
+            startStopFeedback = false;
+        }
+
+        if (gResetFeedbackRequest) {
+            gResetFeedbackRequest = false;
+            resetFeedback = true;
+            resetFeedbackTimer = 0;
+        }
+        if (resetFeedback && resetFeedbackTimer >= BUTTON_FEEDBACK_MS) {
+            resetFeedback = false;
+        }
+
+        bool running = gRunning;
+        uint32_t currentMs = gStopwatchMs;
+
+        bool timeChanged = (currentMs != lastDisplayedMs);
+        bool stateChanged = (running != lastRunning) ||
+                            (startStopFeedback != lastStartStopFeedback) ||
+                            (resetFeedback != lastResetFeedback);
+        bool frameDue = (displayTick >= DISPLAY_INTERVAL_MS);
+
+        if (timeChanged || stateChanged || frameDue) {
+            GrContextForegroundSet(&sContext, ClrBlack);
+            GrRectFill(&sContext, &rectFullScreen);
+
+            uint32_t hour = currentMs / 3600000UL;
+            uint32_t minute = (currentMs / 60000UL) % 60UL;
+            uint32_t second = (currentMs / 1000UL) % 60UL;
+            uint32_t millisecond = currentMs % 1000UL;
+            if (hour > 99U) {
+                hour = 99U;
+            }
+            snprintf(str, sizeof(str), "%02u:%02u:%02u:%03u",
+                     hour, minute, second, millisecond);
+
+            uint32_t screenW = GrContextDpyWidthGet(&sContext);
+            uint32_t screenH = GrContextDpyHeightGet(&sContext);
+            int baseW = 6;
+            int baseH = 8;
+            int len = 12;
+            int x0 = (static_cast<int>(screenW) - baseW * len) / 2;
+            int y0 = (static_cast<int>(screenH) - baseH) / 2 - 10;
+
+            GrContextForegroundSet(&sContext, ClrYellow);
+            GrStringDraw(&sContext, str, len, x0, y0, false);
+
+            tRectangle btnPlayPause = {
+                8,
+                static_cast<int16_t>(screenH - 30U),
+                static_cast<int16_t>(screenW / 2U - 6U),
+                static_cast<int16_t>(screenH - 8U)
+            };
+            tRectangle btnResetRect = {
+                static_cast<int16_t>(screenW / 2U + 6U),
+                static_cast<int16_t>(screenH - 30U),
+                static_cast<int16_t>(screenW - 8U),
+                static_cast<int16_t>(screenH - 8U)
+            };
+
+            uint32_t playColor = startStopFeedback ? ClrGreen : (running ? ClrDarkGreen : ClrOlive);
+            uint32_t resetColor = resetFeedback ? ClrRed : ClrMaroon;
+
+            GrContextForegroundSet(&sContext, playColor);
+            GrRectFill(&sContext, &btnPlayPause);
+            GrContextForegroundSet(&sContext, resetColor);
+            GrRectFill(&sContext, &btnResetRect);
+
+            GrContextForegroundSet(&sContext, ClrWhite);
+            GrRectDraw(&sContext, &btnPlayPause);
+            GrRectDraw(&sContext, &btnResetRect);
+
+            const char *labelPlay = running ? "PAUSE" : "PLAY";
+            const char *labelReset = "RESET";
+            int labelPlayLen = 0;
+            int labelResetLen = 0;
+            while (labelPlay[labelPlayLen] != '\0') {
+                ++labelPlayLen;
+            }
+            while (labelReset[labelResetLen] != '\0') {
+                ++labelResetLen;
+            }
+            int btnPlayWidth = btnPlayPause.i16XMax - btnPlayPause.i16XMin + 1;
+            int btnResetWidth = btnResetRect.i16XMax - btnResetRect.i16XMin + 1;
+            int textY = btnPlayPause.i16YMin + 8;
+            GrStringDraw(&sContext, labelPlay, labelPlayLen,
+                         btnPlayPause.i16XMin + (btnPlayWidth - baseW * labelPlayLen) / 2,
+                         textY, false);
+            GrStringDraw(&sContext, labelReset, labelResetLen,
+                         btnResetRect.i16XMin + (btnResetWidth - baseW * labelResetLen) / 2,
+                         textY, false);
+
+            GrFlush(&sContext);
+
+            lastDisplayedMs = currentMs;
+            lastRunning = running;
+            lastStartStopFeedback = startStopFeedback;
+            lastResetFeedback = resetFeedback;
+            displayTick = 0;
+        }
+    }
+}
+
+static void onStartStopPress()
+{
+    gRunning = !gRunning;
+    gStartStopFeedbackRequest = true;
+}
+
+static void onStartStopRelease()
+{
+    // Release callback is unused but kept for clarity
+}
+
+static void onResetPress()
+{
+    gStopwatchMs = 0;
+    gResetFeedbackRequest = true;
+}
+
+static void onResetRelease()
+{
+    // No action needed on release
+}

@@ -1,0 +1,235 @@
+// TivaWire.h — minimal Energia Wire-compatible layer for TM4C1294XL (DriverLib)
+// Implements just the calls used by OPT3001: begin(), beginTransmission(), write(), endTransmission(),
+// requestFrom(), available(), read(), setClock().
+// Drop this pair into your CCS project and include "TivaWire.h" instead of <Wire.h> if desired.
+// Or, create: #define Wire TivaWire::instance() to mimic Arduino usage.
+
+#ifndef TIVA_WIRE_H
+#define TIVA_WIRE_H
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+
+extern "C" {
+#include "inc/hw_memmap.h"
+#include "inc/hw_types.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/pin_map.h"
+#include "driverlib/i2c.h"
+}
+
+// ===== Configuration =====
+// Select which I2C module/pins to use. The EK-TM4C1294XL BoosterPack I2C (standard) commonly maps to I2C0 on PB2/PB3.
+#ifndef TIVA_WIRE_USE_I2C_BASE
+#define TIVA_WIRE_USE_I2C_BASE I2C0_BASE
+#endif
+#ifndef TIVA_WIRE_GPIO_SCL_CFG
+#define TIVA_WIRE_GPIO_SCL_CFG GPIO_PB2_I2C0SCL
+#endif
+#ifndef TIVA_WIRE_GPIO_SDA_CFG
+#define TIVA_WIRE_GPIO_SDA_CFG GPIO_PB3_I2C0SDA
+#endif
+#ifndef TIVA_WIRE_GPIO_PORT_BASE
+#define TIVA_WIRE_GPIO_PORT_BASE GPIO_PORTB_BASE
+#endif
+#ifndef TIVA_WIRE_GPIO_SCL_PIN
+#define TIVA_WIRE_GPIO_SCL_PIN GPIO_PIN_2
+#endif
+#ifndef TIVA_WIRE_GPIO_SDA_PIN
+#define TIVA_WIRE_GPIO_SDA_PIN GPIO_PIN_3
+#endif
+#ifndef TIVA_WIRE_PERIPH_I2C
+#define TIVA_WIRE_PERIPH_I2C SYSCTL_PERIPH_I2C0
+#endif
+#ifndef TIVA_WIRE_PERIPH_GPIO
+#define TIVA_WIRE_PERIPH_GPIO SYSCTL_PERIPH_GPIOB
+#endif
+
+// ===== Class =====
+class TivaWire {
+public:
+    static TivaWire &instance() { static TivaWire w; return w; }
+
+    // Use g_ui32SysClock if defined by your system init; otherwise fallback to 120 MHz.
+    void begin(bool fastMode = false) {
+        uint32_t sysclk = getSystemClockHz();
+        initHardware(sysclk, fastMode);
+    }
+
+    void begin(uint32_t sysClockHz, bool fastMode = false) {
+        initHardware(sysClockHz, fastMode);
+    }
+
+    void setClock(uint32_t hz) {
+        // Switch between 100k and 400k only, per DriverLib bFast flag.
+        bool fast = (hz >= 400000u);
+        I2CMasterInitExpClk(TIVA_WIRE_USE_I2C_BASE, cachedSysClkHz_, fast);
+    }
+
+    void beginTransmission(uint8_t address) {
+        txAddr_ = address;
+        txLen_ = 0;
+    }
+
+    size_t write(uint8_t b) {
+        if (txLen_ < sizeof(txBuf_)) { txBuf_[txLen_++] = b; return 1; }
+        return 0;
+    }
+
+    // returns 0 on success, otherwise Wire-compatible error codes: 2/3/4
+    uint8_t endTransmission(bool sendStop = true) {
+        if (txLen_ == 0) return 0; // nothing to send
+
+        // Address write mode
+        I2CMasterSlaveAddrSet(TIVA_WIRE_USE_I2C_BASE, txAddr_, false);
+
+        // First byte
+        I2CMasterDataPut(TIVA_WIRE_USE_I2C_BASE, txBuf_[0]);
+        if (txLen_ == 1) {
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_SINGLE_SEND);
+            if (!waitAndCheck_()) return lastErr_;
+        } else {
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_BURST_SEND_START);
+            if (!waitAndCheck_()) return lastErr_;
+            for (size_t i = 1; i < txLen_ - 1; ++i) {
+                I2CMasterDataPut(TIVA_WIRE_USE_I2C_BASE, txBuf_[i]);
+                I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_BURST_SEND_CONT);
+                if (!waitAndCheck_()) return lastErr_;
+            }
+            // last byte
+            I2CMasterDataPut(TIVA_WIRE_USE_I2C_BASE, txBuf_[txLen_ - 1]);
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE,
+                             sendStop ? I2C_MASTER_CMD_BURST_SEND_FINISH
+                                      : I2C_MASTER_CMD_BURST_SEND_CONT);
+            if (!waitAndCheck_()) return lastErr_;
+        }
+
+        if (!sendStop) currentState_ = MASTER_TX; else currentState_ = IDLE;
+        txLen_ = 0;
+        return 0;
+    }
+
+    // Request bytes from slave; returns number of bytes placed in buffer
+    uint8_t requestFrom(uint8_t address, uint8_t quantity, bool sendStop = true) {
+        if (quantity == 0) return 0;
+        rxLen_ = 0; rxRead_ = 0;
+
+        I2CMasterSlaveAddrSet(TIVA_WIRE_USE_I2C_BASE, address, true);
+
+        if (quantity == 1) {
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_SINGLE_RECEIVE);
+            if (!waitAndCheck_()) return 0;
+            rxBuf_[rxLen_++] = (uint8_t)I2CMasterDataGet(TIVA_WIRE_USE_I2C_BASE);
+        } else {
+            // start
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_BURST_RECEIVE_START);
+            if (!waitAndCheck_()) return 0;
+            rxBuf_[rxLen_++] = (uint8_t)I2CMasterDataGet(TIVA_WIRE_USE_I2C_BASE);
+            // middle
+            for (uint8_t i = 1; i < quantity - 1; ++i) {
+                I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_BURST_RECEIVE_CONT);
+                if (!waitAndCheck_()) return rxLen_;
+                rxBuf_[rxLen_++] = (uint8_t)I2CMasterDataGet(TIVA_WIRE_USE_I2C_BASE);
+            }
+            // last
+            I2CMasterControl(TIVA_WIRE_USE_I2C_BASE,
+                             sendStop ? I2C_MASTER_CMD_BURST_RECEIVE_FINISH
+                                      : I2C_MASTER_CMD_BURST_RECEIVE_CONT);
+            if (!waitAndCheck_()) return rxLen_;
+            rxBuf_[rxLen_++] = (uint8_t)I2CMasterDataGet(TIVA_WIRE_USE_I2C_BASE);
+        }
+        currentState_ = sendStop ? IDLE : MASTER_RX;
+        return rxLen_;
+    }
+
+    int available() const { return (int)(rxLen_ - rxRead_); }
+    int read() { return (rxRead_ < rxLen_) ? rxBuf_[rxRead_++] : -1; }
+
+private:
+    enum { IDLE = 0, MASTER_TX = 1, MASTER_RX = 2 };
+
+    // Buffers
+    uint8_t txBuf_[64]{}; size_t txLen_ = 0;
+    uint8_t rxBuf_[64]{}; size_t rxLen_ = 0; size_t rxRead_ = 0;
+
+    uint8_t txAddr_ = 0;
+    uint8_t currentState_ = IDLE;
+    uint32_t cachedSysClkHz_ = 120000000U;
+    uint8_t lastErr_ = 0;
+
+    void initHardware(uint32_t sysclk, bool fastMode) {
+        cachedSysClkHz_ = sysclk ? sysclk : 120000000U;
+        SysCtlPeripheralEnable(TIVA_WIRE_PERIPH_GPIO);
+        while (!SysCtlPeripheralReady(TIVA_WIRE_PERIPH_GPIO)) {}
+        SysCtlPeripheralEnable(TIVA_WIRE_PERIPH_I2C);
+        while (!SysCtlPeripheralReady(TIVA_WIRE_PERIPH_I2C)) {}
+
+        GPIOPinConfigure(TIVA_WIRE_GPIO_SCL_CFG);
+        GPIOPinConfigure(TIVA_WIRE_GPIO_SDA_CFG);
+        GPIOPinTypeI2CSCL(TIVA_WIRE_GPIO_PORT_BASE, TIVA_WIRE_GPIO_SCL_PIN);
+        GPIOPinTypeI2C(TIVA_WIRE_GPIO_PORT_BASE, TIVA_WIRE_GPIO_SDA_PIN);
+
+        I2CMasterInitExpClk(TIVA_WIRE_USE_I2C_BASE, cachedSysClkHz_, fastMode);
+        I2CMasterEnable(TIVA_WIRE_USE_I2C_BASE);
+        currentState_ = IDLE; txLen_ = 0; rxLen_ = 0; rxRead_ = 0; lastErr_ = 0;
+    }
+
+    bool waitAndCheck_() {
+        // Busy-wait until the operation completes, then check error flags
+        while (I2CMasterBusy(TIVA_WIRE_USE_I2C_BASE)) {}
+        uint32_t e = I2CMasterErr(TIVA_WIRE_USE_I2C_BASE);
+        if (e == I2C_MASTER_ERR_NONE) return true;
+        // Map to Arduino Wire error codes
+        if (e == I2C_MASTER_ERR_ADDR_ACK) lastErr_ = 2;
+        else if (e == I2C_MASTER_ERR_DATA_ACK) lastErr_ = 3;
+        else lastErr_ = 4; // other (arbitration lost, etc.)
+        // try to gracefully stop on error
+        I2CMasterControl(TIVA_WIRE_USE_I2C_BASE, I2C_MASTER_CMD_BURST_SEND_ERROR_STOP);
+        while (I2CMasterBusy(TIVA_WIRE_USE_I2C_BASE)) {}
+        currentState_ = IDLE;
+        return false;
+    }
+
+    static uint32_t getSystemClockHz() {
+        // Many TI examples cache system clock here after SysCtlClockFreqSet().
+        extern uint32_t g_ui32SysClock; // defined in your system init, if present
+        // If the symbol is not linked, default to 120 MHz (typical for EK-TM4C1294XL examples).
+        // The weak symbol trick avoids a hard link error if not present.
+        if (&g_ui32SysClock) {
+            // Heuristic: if zero, fallback to 120 MHz
+            return g_ui32SysClock ? g_ui32SysClock : 120000000U;
+        }
+        return 120000000U;
+    }
+};
+
+// Provide an Arduino-style global alias
+#ifndef Wire
+#define Wire TivaWire::instance()
+#endif
+
+#endif // TIVA_WIRE_H
+
+
+// =============================
+// TivaWire_Example.cpp — usage
+// =============================
+/*
+#include "TivaWire.h"
+#include "OPT3001.h"  // existing library, unmodified
+
+extern uint32_t g_ui32SysClock; // set during clock init
+
+int main(void) {
+    // ... system clock, pins, UART init ... set g_ui32SysClock
+    Wire.begin(false); // 100kHz
+    opt3001 light;
+    light.begin();
+    while (1) {
+        uint32_t lux = light.readResult();
+        // print lux ...
+    }
+}
+*/
