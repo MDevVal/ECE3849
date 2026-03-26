@@ -15,3 +15,6 @@
 -Ilibs/joystickDriver
 -Ilibs/pll
 -Ilibs/timerLib
+-Ilibs/FreeRTOS
+-Ilibs/FreeRTOS/FreeRTOS/include
+-Ilibs/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F
