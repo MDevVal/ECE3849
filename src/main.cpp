@@ -5,6 +5,7 @@
 #include <string.h>
 
 extern "C" {
+#include "driverlib/gpio.h"
 #include "driverlib/fpu.h"
 #include "driverlib/sysctl.h"
 #include "driverlib/interrupt.h"
@@ -13,49 +14,40 @@ extern "C" {
 #include "Crystalfontz128x128_ST7735.h"
 #include "grlib/grlib.h"
 #include "sysctl_pll.h"
+#include "FreeRTOS.h"
+#include "task.h"
 }
 
 #include "button.h"
 #include "timerLib.h"
 #include "elapsedTime.h"
+#include "pins.h"
 
 // ===== Global configuration =====
-static constexpr uint32_t BUTTON_TICK_MS     = 20U;
-static constexpr uint32_t DISPLAY_REFRESH_MS = (1000/60);
+#define LED_PORT_BASE GPIO_PORTN_BASE
+#define LED1_PIN      GPIO_PIN_0
+#define LED2_PIN      GPIO_PIN_1
 
-uint32_t gSystemClock = 0;
-volatile uint32_t gStopwatchMs = 0;
-volatile bool gRunning = false;
+typedef struct {
+    uint32_t port;
+    uint32_t pins;
+    uint64_t period_ms;
+} LedTaskPeriodicParams;
 
-// ============================================================================
-// STRUCT: Simple GUI Button (for drawing)
-// ============================================================================
-struct MyButton {
-    int x, y, w, h;
-    const char* label;
-    bool pressed;
-};
+void led_task_periodic(void *pvParameters) {
+    // === One-time setup (runs once when task starts) ===
+    LedTaskPeriodicParams *params = (LedTaskPeriodicParams *)pvParameters;
 
-// One on-screen button: Play / Pause
-static MyButton btnStart = {39, 80, 50, 28, "PLAY", false};
+    bool pin_state = false;
+    // === Periodic loop ===
+    for (;;) {
+        // Do work here
+        GPIOPinWrite(params->port, params->pins, pin_state ? params->pins : 0);
+        pin_state = !pin_state;
 
-// ============================================================================
-// Hardware button
-// ============================================================================
-static Button btnPlayPause(S1);  // S1 → Play/Pause
-static Button btnReset(S2); // S2 -> Reset
-
-// ============================================================================
-// Function prototypes
-// ============================================================================
-static void initializeDisplay(tContext &context);
-static void configureTimer(Timer &timer);
-static void setupButtons();
-static void drawStopwatchScreen(tContext &context, uint32_t currentMs, bool running);
-static void drawButton(tContext &context, const MyButton &btn);
-
-static void onPlayPauseClick();
-static void onPlayPauseRelease();
+        vTaskDelay(pdMS_TO_TICKS(params->period_ms));
+    }
+}
 
 // ============================================================================
 // MAIN PROGRAM
@@ -66,169 +58,35 @@ int main(void)
     FPUEnable();
     FPULazyStackingEnable();
 
-    gSystemClock = SysCtlClockFreqSet(SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,120000000);
+    SysCtlClockFreqSet(SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN |SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,120000000);
 
-    tContext sContext;
-    initializeDisplay(sContext);
+    // Initialize LED GPIO
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION));
+    GPIOPinTypeGPIOOutput(LED_PORT_BASE, LED1_PIN | LED2_PIN);
 
-    Timer timer;
-    configureTimer(timer);
 
-    elapsedMillis buttonTick(timer);
-    elapsedMillis displayTick(timer);
-    elapsedMillis stopwatchTick(timer);
-
-    setupButtons();
     IntMasterEnable();
 
-    uint32_t lastDisplayedSec = static_cast<uint32_t>(-1);
-    bool lastRunning = !gRunning;
+
+    static LedTaskPeriodicParams task_params_200ms = {
+        .port = LED_PORT_BASE,
+        .pins = LED2_PIN,
+        .period_ms = 200,
+    };
+    TaskHandle_t led_task_200ms;
+    xTaskCreate(&led_task_periodic, "200ms Blink", 512, &task_params_200ms, 0, &led_task_200ms);
+
+    static LedTaskPeriodicParams task_params_2000ms = {
+        .port = LED_PORT_BASE,
+        .pins = LED1_PIN,
+        .period_ms = 2000,
+    };
+    TaskHandle_t led_task_2000ms;
+    xTaskCreate(&led_task_periodic, "2000ms Blink", 512, &task_params_2000ms, 0, &led_task_2000ms);
+    vTaskStartScheduler();
 
     while (true) {
-        // --- Poll physical button ---
-        if (buttonTick >= BUTTON_TICK_MS) {
-            btnPlayPause.tick();
-            btnReset.tick();
-            buttonTick = 0;
-        }
-
-        // --- Handle Play/Pause button ---
-        if (btnPlayPause.wasPressed()) {
-            btnStart.pressed = true;
-            onPlayPauseClick();
-        }
-        if (btnPlayPause.wasReleased()) {
-            btnStart.pressed = false;
-            onPlayPauseRelease();
-        }
-        if (btnReset.wasPressed()) {
-            gStopwatchMs = 0;
-            gRunning = false;
-            btnStart.label = "PLAY";
-        }
-
-        // --- Stopwatch logic ---
-        if (gRunning) {
-            uint32_t delta = stopwatchTick;
-            if (delta > 0U) {
-                gStopwatchMs += delta;
-                stopwatchTick = 0;
-            }
-        } else {
-            stopwatchTick = 0;
-        }
-
-        // --- Update screen if needed ---
-        uint32_t currentSec = gStopwatchMs / 1000U;
-        if ((currentSec != lastDisplayedSec) ||
-            (gRunning != lastRunning) ||
-            (displayTick >= DISPLAY_REFRESH_MS)) {
-
-            drawStopwatchScreen(sContext, gStopwatchMs, gRunning);
-            drawButton(sContext, btnStart);
-
-            #ifdef GrFlush
-            GrFlush(&sContext);
-            #endif
-
-            lastDisplayedSec = currentSec;
-            lastRunning = gRunning;
-            displayTick = 0;
-        }
     }
-}
 
-// ============================================================================
-// System configuration
-// ============================================================================
-
-static void initializeDisplay(tContext &context)
-{
-    Crystalfontz128x128_Init();
-    Crystalfontz128x128_SetOrientation(LCD_ORIENTATION_UP);
-    GrContextInit(&context, &g_sCrystalfontz128x128);
-    GrContextFontSet(&context, &g_sFontFixed6x8);
-
-    tRectangle full = {0, 0, 127, 127};
-    GrContextForegroundSet(&context, ClrBlack);
-    GrRectFill(&context, &full);
-}
-
-static void configureTimer(Timer &timer)
-{
-    timer.begin(gSystemClock, TIMER0_BASE);
-}
-
-static void setupButtons()
-{
-    btnPlayPause.begin();
-    btnPlayPause.setTickIntervalMs(BUTTON_TICK_MS);
-    btnPlayPause.setDebounceMs(30);
-
-    btnReset.begin();
-    btnReset.setTickIntervalMs(BUTTON_TICK_MS);
-    btnReset.setDebounceMs(30);
-}
-
-// ============================================================================
-// Drawing functions
-// ============================================================================
-static void drawStopwatchScreen(tContext &context, uint32_t current_ms, bool running)
-{
-    tRectangle rectFull = {0, 0, 127, 127};
-    GrContextForegroundSet(&context, ClrBlack);
-    GrRectFill(&context, &rectFull);
-
-    // === Draw title "STOPWATCH" at the top ===
-    GrContextForegroundSet(&context, ClrCyan);
-    GrStringDrawCentered(&context, "STOPWATCH", -1, 64, 15, false);
-
-    // Draw seconds counter centered
-    char str[32];
-    uint32_t ms = current_ms % 1000;
-    uint32_t seconds = (current_ms / 1000) % 60;
-    uint32_t minutes = (current_ms / (1000 * 60)) % 60;
-    uint32_t hours = (current_ms / (1000 * 60 * 60));
-    snprintf(str, sizeof(str), "%02d:%02d:%02d:%03d", hours, minutes, seconds, ms);
-
-    GrContextForegroundSet(&context, running ? ClrYellow : ClrOlive);
-    GrStringDrawCentered(&context, str, -1, 64, 50, false);
-
-    if (running) {
-        strncpy(str, "Running", sizeof(str));
-    } else {
-        strncpy(str, "Stopped", sizeof(str));
-    }
-    GrStringDrawCentered(&context, str, -1, 64, 30, false);
-}
-
-static void drawButton(tContext &context, const MyButton &btn)
-{
-    uint16_t bgColor = btn.pressed ? ClrBlack : ClrGray;
-    uint16_t textColor = btn.pressed ? ClrWhite : ClrBlack;
-
-    tRectangle rect = {static_cast<int16_t>(btn.x), static_cast<int16_t>(btn.y), static_cast<int16_t>(btn.x + btn.w - 1), static_cast<int16_t>(btn.y + btn.h - 1)};
-    GrContextForegroundSet(&context, bgColor);
-    GrRectFill(&context, &rect);
-
-    GrContextForegroundSet(&context, ClrBlack);
-    GrRectDraw(&context, &rect);
-
-    GrContextForegroundSet(&context, textColor);
-    GrStringDrawCentered(&context, btn.label, -1,
-                         btn.x + btn.w / 2, btn.y + btn.h / 2, false);
-}
-
-// ============================================================================
-// Button callbacks
-// ============================================================================
-static void onPlayPauseClick()
-{
-    gRunning = !gRunning;
-    btnStart.label = gRunning ? "PAUSE" : "PLAY";
-}
-
-static void onPlayPauseRelease()
-{
-    // Optional visual or sound feedback
 }

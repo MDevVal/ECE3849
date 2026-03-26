@@ -17,7 +17,7 @@ echo "Uploading $BIN to TM4C1294..."
 
 # Use nix-shell for lm4flash on NixOS, fall back to system lm4flash
 if command -v nix-shell &> /dev/null; then
-    nix-shell -p lm4flash --run "lm4flash '$BIN'"
+    nix-shell -p lm4flash --run "sudo lm4flash '$BIN'"
 elif command -v lm4flash &> /dev/null; then
     lm4flash "$BIN"
 else
