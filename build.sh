@@ -51,6 +51,9 @@ CFLAGS="$CFLAGS --include_path=$LIBS/elapsedTime"
 CFLAGS="$CFLAGS --include_path=$LIBS/joystickDriver"
 CFLAGS="$CFLAGS --include_path=$LIBS/pll"
 CFLAGS="$CFLAGS --include_path=$LIBS/timerLib"
+CFLAGS="$CFLAGS --include_path=$LIBS/FreeRTOS"
+CFLAGS="$CFLAGS --include_path=$LIBS/FreeRTOS/FreeRTOS/include"
+CFLAGS="$CFLAGS --include_path=$LIBS/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F"
 CFLAGS="$CFLAGS --include_path=$CCSINC"
 CFLAGS="$CFLAGS --define=ccs --define=PART_TM4C1294NCPDT --define=TARGET_IS_TM4C129_RA1"
 CFLAGS="$CFLAGS -g --gcc --diag_warning=225 --abi=eabi"
@@ -74,6 +77,20 @@ compile "$LIBS/timerLib/timerLib.cpp" "$BUILD/timerLib.obj"
 compile "$LIBS/buttonsDriver/button.cpp" "$BUILD/button.obj"
 compile "$LIBS/joystickDriver/joystick.cpp" "$BUILD/joystick.obj"
 
+# FreeRTOS kernel sources
+compile "$LIBS/FreeRTOS/FreeRTOS/tasks.c" "$BUILD/freertos_tasks.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/queue.c" "$BUILD/freertos_queue.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/list.c" "$BUILD/freertos_list.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/timers.c" "$BUILD/freertos_timers.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/event_groups.c" "$BUILD/freertos_event_groups.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/stream_buffer.c" "$BUILD/freertos_stream_buffer.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F/port.c" "$BUILD/freertos_port.obj"
+compile "$LIBS/FreeRTOS/FreeRTOS/portable/MemMang/heap_4.c" "$BUILD/freertos_heap.obj"
+
+# FreeRTOS port assembly
+echo "  Compiling portasm.asm..."
+"$CC" $CFLAGS -c "$LIBS/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F/portasm.asm" --output_file="$BUILD/freertos_portasm.obj"
+
 echo "  Linking..."
 "$CC" -mv7M4 --code_state=16 --float_support=FPv4SPD16 -me -O1 \
     --define=ccs --define=PART_TM4C1294NCPDT --define=TARGET_IS_TM4C129_RA1 \
@@ -92,6 +109,15 @@ echo "  Linking..."
     "$BUILD/timerLib.obj" \
     "$BUILD/button.obj" \
     "$BUILD/joystick.obj" \
+    "$BUILD/freertos_tasks.obj" \
+    "$BUILD/freertos_queue.obj" \
+    "$BUILD/freertos_list.obj" \
+    "$BUILD/freertos_timers.obj" \
+    "$BUILD/freertos_event_groups.obj" \
+    "$BUILD/freertos_stream_buffer.obj" \
+    "$BUILD/freertos_port.obj" \
+    "$BUILD/freertos_heap.obj" \
+    "$BUILD/freertos_portasm.obj" \
     "$LINKER/tm4c1294.cmd" \
     -l"$TIVA/driverlib/ccs/Debug/driverlib.lib" \
     -l"$TIVA/grlib/ccs/Debug/grlib.lib" \
