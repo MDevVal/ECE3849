@@ -1,0 +1,51 @@
+#include <stdint.h>
+
+extern "C" {
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "inc/hw_memmap.h"
+#include "sysctl_pll.h"
+}
+
+#include "timerLib.h"
+
+// Parpadeo con millis() usando WideTimer64
+// LED de usuario en EK-TM4C1294XL:
+// Recomendado: PN1 (D1) activo alto (TivaWare ejemplo "blinky").
+// Si tu placa usa otro LED, ajusta LED_PORT/LED_PIN y el periférico habilitado.
+
+static constexpr uint32_t LED_PORT = GPIO_PORTN_BASE;
+static constexpr uint8_t  LED_PIN  = GPIO_PIN_1;
+
+int main(void)
+{
+    // Configurar reloj del sistema a 120 MHz usando PLL y obtener frecuencia efectiva
+    uint32_t sysclk = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+    if (sysclk == 0) { // Fallback por si algo falla en el cálculo
+        sysclk = 120000000;
+    }
+
+    // Configurar GPIO para LED (PN1 por defecto)
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION)) {}
+    GPIOPinTypeGPIOOutput(LED_PORT, LED_PIN);
+    GPIOPinWrite(LED_PORT, LED_PIN, 0);
+
+    // Iniciar Timer estándar 32-bit (TIMER0) como "timer normal"
+    Timer t;
+    t.begin(sysclk, TIMER0_BASE);
+
+    uint64_t last = t.millis();
+    bool led = false;
+
+    for (;;) {
+        uint64_t now = t.millis();
+        if (now - last >= 500) { // 500 ms toggle
+            led = !led;
+            GPIOPinWrite(LED_PORT, LED_PIN, led ? LED_PIN : 0);
+            last = now;
+        }
+    }
+}

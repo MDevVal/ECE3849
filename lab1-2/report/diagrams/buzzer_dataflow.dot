@@ -1,0 +1,40 @@
+digraph Buzzer_DataFlow {
+    rankdir=LR;
+    node [shape=box, style="rounded,filled", fontname="Helvetica"];
+    edge [fontname="Helvetica"];
+
+    labelloc="t";
+    label="Button Press to Buzzer Sound Data Flow";
+    fontsize=14;
+    fontname="Helvetica-Bold";
+
+    // Components
+    button_hw [label="Physical Button\n(S1 or S2)", shape=ellipse, fillcolor="#FFE4B5"];
+    button_task [label="Button Task\n(task_buttons)", fillcolor="#FFD700"];
+
+    msg_create [label="Create\nBuzzerMessage_t\n{freq, duration}", shape=parallelogram, fillcolor="#E6E6FA"];
+
+    queue [label="buzzer_queue\n(FreeRTOS Queue)\nCapacity: 16 items", shape=cylinder, fillcolor="#FFA07A"];
+
+    buzzer_task [label="Buzzer Task\n(task_buzzer)", fillcolor="#DDA0DD"];
+
+    pwm_config [label="Configure PWM\nPWMGenPeriodSet()\nPWMPulseWidthSet()", shape=parallelogram, fillcolor="#E6E6FA"];
+
+    delay [label="vTaskDelay()\nduration_ms", shape=diamond, fillcolor="#98FB98"];
+
+    buzzer_hw [label="Buzzer Hardware\n(PWM0, PF1)", shape=ellipse, fillcolor="#B0C4DE"];
+
+    // Flow
+    button_hw -> button_task [label="1. GPIO read\nvia tick()"];
+    button_task -> msg_create [label="2. wasPressed()\ndetected"];
+    msg_create -> queue [label="3. xQueueSend()\ntimeout=0"];
+    queue -> buzzer_task [label="4. xQueueReceive()\nportMAX_DELAY"];
+    buzzer_task -> pwm_config [label="5. Buzzer_Beep()"];
+    pwm_config -> buzzer_hw [label="6. PWM enabled"];
+    pwm_config -> delay [label="7. Wait"];
+    delay -> buzzer_hw [label="8. PWM disabled", style=dashed];
+
+    // Note about queue full
+    note [label="Note: If queue full\nxQueueSend returns errQUEUE_FULL\nCommand is dropped (not blocking)", shape=note, fillcolor="#FFFACD"];
+    queue -> note [style=dotted, dir=none];
+}

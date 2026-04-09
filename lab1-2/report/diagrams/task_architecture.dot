@@ -1,0 +1,65 @@
+digraph FreeRTOS_Architecture {
+    rankdir=TB;
+    node [shape=box, style="rounded,filled", fontname="Helvetica"];
+    edge [fontname="Helvetica"];
+
+    // Title
+    labelloc="t";
+    label="FreeRTOS Stopwatch Task Architecture";
+    fontsize=16;
+    fontname="Helvetica-Bold";
+
+    // Scheduler
+    scheduler [label="FreeRTOS Scheduler", shape=box, style="filled", fillcolor="#4A90D9", fontcolor="white"];
+
+    // Tasks with priorities
+    subgraph cluster_tasks {
+        label="Tasks";
+        style=dashed;
+
+        task_time [label="Time Task\n(Priority 3 - Highest)\n10ms period", fillcolor="#90EE90"];
+        task_buttons [label="Button Task\n(Priority 2)\n20ms period", fillcolor="#FFD700"];
+        task_display [label="Display Task\n(Priority 1)\n33ms period (~30 FPS)", fillcolor="#87CEEB"];
+        task_buzzer [label="Buzzer Task\n(Priority 1)\nBlocks on queue", fillcolor="#DDA0DD"];
+    }
+
+    // Shared State
+    subgraph cluster_shared {
+        label="Shared Volatile State";
+        style=filled;
+        fillcolor="#F5F5F5";
+
+        shared [label="gRunning : bool\ng_ms : uint16_t\ng_sec : uint8_t\ng_min : uint8_t\ng_hr : uint8_t", shape=note, fillcolor="#FFFACD"];
+    }
+
+    // Queue
+    queue [label="buzzer_queue\n(FreeRTOS Queue)\nBuzzerMessage_t", shape=cylinder, fillcolor="#FFA07A"];
+
+    // Hardware
+    subgraph cluster_hw {
+        label="Hardware";
+        style=filled;
+        fillcolor="#E8E8E8";
+
+        lcd [label="LCD Display\n128x128", shape=box3d, fillcolor="#B0C4DE"];
+        buttons_hw [label="Buttons\nS1 (Play/Pause)\nS2 (Reset)", shape=box3d, fillcolor="#B0C4DE"];
+        buzzer_hw [label="PWM Buzzer\nPF1 (M0PWM1)", shape=box3d, fillcolor="#B0C4DE"];
+    }
+
+    // Connections
+    scheduler -> task_time [label="schedules"];
+    scheduler -> task_buttons [label="schedules"];
+    scheduler -> task_display [label="schedules"];
+    scheduler -> task_buzzer [label="schedules"];
+
+    task_time -> shared [label="writes\n(increment)", style=dashed];
+    task_buttons -> shared [label="reads/writes\n(toggle/reset)", style=dashed];
+    task_display -> shared [label="reads", style=dashed];
+
+    task_buttons -> queue [label="xQueueSend()\n(non-blocking)"];
+    queue -> task_buzzer [label="xQueueReceive()\n(blocking)"];
+
+    task_display -> lcd [label="GrLib API"];
+    task_buttons -> buttons_hw [label="GPIO read"];
+    task_buzzer -> buzzer_hw [label="PWM output"];
+}

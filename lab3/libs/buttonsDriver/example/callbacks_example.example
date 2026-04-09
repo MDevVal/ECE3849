@@ -1,0 +1,67 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "button.h"
+#include "pins.h"
+
+// LEDs en PN0 y PN1
+#define LED_PORT_BASE GPIO_PORTN_BASE
+#define LED1_PIN      GPIO_PIN_0
+#define LED2_PIN      GPIO_PIN_1
+
+static inline void ledOn(uint8_t pin) { GPIOPinWrite(LED_PORT_BASE, pin, pin); }
+static inline void ledOff(uint8_t pin){ GPIOPinWrite(LED_PORT_BASE, pin, 0); }
+static inline void ledToggle(uint8_t pin){
+    uint32_t v = GPIOPinRead(LED_PORT_BASE, pin);
+    GPIOPinWrite(LED_PORT_BASE, pin, (v & pin) ? 0 : pin);
+}
+
+// Botón con API estilo OneButton
+static Button btn(USR_SW1);
+
+static void onPress() { ledOn(LED1_PIN); }
+static void onClick() {
+    // Click simple: apaga LED1 y LED2
+    ledOff(LED1_PIN);
+    ledOff(LED2_PIN);
+}
+static void onDoubleClick() {
+    // Doble click: enciende LED2
+    ledOn(LED2_PIN);
+}
+static void onLongPressStart() { ledOn(LED1_PIN); ledOn(LED2_PIN); }
+static void onLongPressStop()  { ledOff(LED1_PIN); ledOff(LED2_PIN); }
+
+int main(void) {
+    uint32_t gSystemClock = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+
+    // Inicializa GPIO de LEDs
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION));
+    GPIOPinTypeGPIOOutput(LED_PORT_BASE, LED1_PIN | LED2_PIN);
+
+    // Inicializa el botón (habilita clock del puerto y configura pad) después del clock del MCU
+    btn.begin();
+
+    // Ajustes de tiempos (opcionales): tick ~20 ms
+    btn.setTickIntervalMs(20);
+    btn.setDebounceMs(50);
+    btn.setClickMs(400);  // ventana para click/doble click
+    btn.setPressMs(800);  // umbral long-press
+
+    // Registrar callbacks tipo OneButton
+    btn.attachPress(onPress);
+    btn.attachClick(onClick);
+    btn.attachDoubleClick(onDoubleClick);
+    btn.attachLongPressStart(onLongPressStart);
+    btn.attachLongPressStop(onLongPressStop);
+
+    while(1){
+        btn.tick();
+        SysCtlDelay(gSystemClock / 3 / 50); // ~20 ms
+    }
+}

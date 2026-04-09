@@ -1,0 +1,98 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include "inc/hw_memmap.h"
+#include "inc/hw_ints.h"
+#include "inc/hw_timer.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/interrupt.h"
+#include "driverlib/timer.h"
+#include "button.h"
+#include "pins.h"
+
+// LEDs en PN0 y PN1
+#define LED_PORT_BASE GPIO_PORTN_BASE
+#define LED1_PIN      GPIO_PIN_0
+#define LED2_PIN      GPIO_PIN_1
+
+static inline void ledOn(uint8_t pin) { GPIOPinWrite(LED_PORT_BASE, pin, pin); }
+static inline void ledOff(uint8_t pin){ GPIOPinWrite(LED_PORT_BASE, pin, 0); }
+static inline void ledToggle(uint8_t pin){
+    uint32_t v = GPIOPinRead(LED_PORT_BASE, pin);
+    GPIOPinWrite(LED_PORT_BASE, pin, (v & pin) ? 0 : pin);
+}
+
+// Botón global
+static Button btn(USR_SW1);
+
+// Tick period in ms
+#define TICK_MS 20
+
+// Prototipo ISR (enlazado C para compatibilidad con vector/registro)
+#ifdef __cplusplus
+extern "C" {
+#endif
+static void Timer0AIntHandler(void);
+#ifdef __cplusplus
+}
+#endif
+
+// Callbacks estilo OneButton
+static void onPress()           { ledOn(LED1_PIN); }
+static void onClick()           { ledOff(LED1_PIN); ledOff(LED2_PIN); }
+static void onDoubleClick()     { ledOn(LED2_PIN); }
+static void onLongPressStart()  { ledOn(LED1_PIN); ledOn(LED2_PIN); }
+static void onLongPressStop()   { ledOff(LED1_PIN); ledOff(LED2_PIN); }
+
+int main(void) {
+    uint32_t gSystemClock = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+
+    // LEDs
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION));
+    GPIOPinTypeGPIOOutput(LED_PORT_BASE, LED1_PIN | LED2_PIN);
+
+    // Inicializar botón
+    btn.begin();
+    btn.setTickIntervalMs(TICK_MS);
+    btn.setDebounceMs(50);
+    btn.setClickMs(400);
+    btn.setPressMs(800);
+
+    // Registrar callbacks
+    btn.attachPress(onPress);
+    btn.attachClick(onClick);
+    btn.attachDoubleClick(onDoubleClick);
+    btn.attachLongPressStart(onLongPressStart);
+    btn.attachLongPressStop(onLongPressStop);
+
+    // Configurar TIMER0A periódico a TICK_MS
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_TIMER0);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_TIMER0));
+    TimerDisable(TIMER0_BASE, TIMER_BOTH);
+    TimerConfigure(TIMER0_BASE, TIMER_CFG_PERIODIC);
+    uint32_t ticks = (gSystemClock / 1000) * TICK_MS; // ciclos por TICK_MS
+    TimerLoadSet(TIMER0_BASE, TIMER_A, ticks - 1);
+    // Registrar ISR de forma explícita para evitar dependencia del nombre en startup_ccs.c
+    TimerIntRegister(TIMER0_BASE, TIMER_A, Timer0AIntHandler);
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+    TimerIntEnable(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+    // Prioridad NVIC (0x00 más alta, 0xFF más baja). Ajusta según tu proyecto
+    IntPrioritySet(INT_TIMER0A, 0x80);
+    IntEnable(INT_TIMER0A);
+    IntMasterEnable();
+    TimerEnable(TIMER0_BASE, TIMER_BOTH);
+
+    while(1){
+        // El trabajo se hace en la ISR; aquí puedes dormir o hacer otras tareas
+        // Opcional: tareas de fondo
+    }
+}
+
+static void Timer0AIntHandler(void) {
+    TimerIntClear(TIMER0_BASE, TIMER_TIMA_TIMEOUT);
+    // Tick del botón cada TICK_MS; la FSM ahora no depende del lazo principal
+    btn.tick();
+}

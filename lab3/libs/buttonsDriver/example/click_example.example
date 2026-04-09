@@ -1,0 +1,72 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "button.h"
+#include "pins.h"        // Energia pin mapping for TM4C1294XL
+
+// Botón en USR_SW1 (definido en pins.h)
+Button sw1(USR_SW1);
+
+// LED1 en PN0, LED2 en PN1 (Tiva TM4C1294XL LaunchPad)
+#define LED1_PORT_BASE GPIO_PORTN_BASE
+#define LED2_PORT_BASE GPIO_PORTN_BASE
+#define LED1_PIN       GPIO_PIN_0
+#define LED2_PIN       GPIO_PIN_1
+
+static inline void ledOn(uint32_t port, uint8_t pin) {
+    GPIOPinWrite(port, pin, pin);
+}
+static inline void ledOff(uint32_t port, uint8_t pin) {
+    GPIOPinWrite(port, pin, 0x0);
+}
+static inline void ledToggle(uint32_t port, uint8_t pin) {
+    uint32_t v = GPIOPinRead(port, pin);
+    GPIOPinWrite(port, pin, (v & pin) ? 0 : pin);
+}
+
+int main(void)
+{
+    // 1) Reloj a 120 MHz
+    uint32_t gSystemClock = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+
+    // 2) Habilitar periféricos GPIO para LEDs (PN0, PN1)
+    //    Nota: el botón (USR_SW1) se habilita dentro del constructor de Button
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION); // LEDs
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION));
+
+    // 3) Configurar LEDs como salida
+    GPIOPinTypeGPIOOutput(LED1_PORT_BASE, LED1_PIN | LED2_PIN);
+
+    // 4) El constructor de Button configura el pin del botón como entrada con pull-up
+    //    (si tu placa tiene otra configuración, ajusta ButtonPull o el mapeo en pins.h)
+
+    // 5) Bucle principal sin RTOS
+    while (1)
+    {
+        // Actualiza el estado del botón; llama cada ~10–20 ms
+        sw1.tick();
+
+        // LED1 encendido mientras el botón está presionado
+        if (sw1.isPressed())
+            ledOn(LED1_PORT_BASE, LED1_PIN);
+        else
+            ledOff(LED1_PORT_BASE, LED1_PIN);
+
+        // Eventos: un click simple confirma el click; doble click enciende LED2
+        ButtonEvent ev = sw1.getEvent();
+        if (ev == ButtonEvent::DoubleClick) {
+            // Enciende LED2 con doble click
+            ledOn(LED2_PORT_BASE, LED2_PIN);
+        } else if (ev == ButtonEvent::Click) {
+            // Apaga LED2 en un click simple (puedes cambiar a toggle si prefieres)
+            ledOff(LED2_PORT_BASE, LED2_PIN);
+        }
+
+        // Pequeño retardo de 20 ms (50 Hz). SysCtlDelay usa 3 ciclos por iteración
+        SysCtlDelay(gSystemClock / 3 / 50);
+    }
+}

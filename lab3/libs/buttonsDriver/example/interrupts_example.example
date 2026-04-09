@@ -1,0 +1,92 @@
+#include <stdint.h>
+#include <stdbool.h>
+#include "inc/hw_memmap.h"
+#include "driverlib/sysctl.h"
+#include "driverlib/gpio.h"
+#include "driverlib/interrupt.h"
+#include "inc/hw_ints.h"  // Define INT_GPIOJ y vectores NVIC específicos
+#include "button.h"
+#include "pins.h"
+
+// LEDs en PN0 y PN1
+#define LED_PORT_BASE GPIO_PORTN_BASE
+#define LED1_PIN      GPIO_PIN_0
+#define LED2_PIN      GPIO_PIN_1
+
+static inline void ledOn(uint8_t pin) { GPIOPinWrite(LED_PORT_BASE, pin, pin); }
+static inline void ledOff(uint8_t pin){ GPIOPinWrite(LED_PORT_BASE, pin, 0); }
+static inline void ledToggle(uint8_t pin){
+    uint32_t v = GPIOPinRead(LED_PORT_BASE, pin);
+    GPIOPinWrite(LED_PORT_BASE, pin, (v & pin) ? 0 : pin);
+}
+
+// Botón global (no inicializa GPIO hasta begin())
+static Button btn(USR_SW1);
+
+// Prototipos
+static void onButtonEdge(void);
+static void GPIOJ_Handler(void);
+
+// Callbacks estilo OneButton
+static void onPress()           { ledOn(LED1_PIN); }
+static void onClick()           { ledOff(LED1_PIN); ledOff(LED2_PIN); }
+static void onDoubleClick()     { ledOn(LED2_PIN); }
+static void onLongPressStart()  { ledOn(LED1_PIN); ledOn(LED2_PIN); }
+static void onLongPressStop()   { ledOff(LED1_PIN); ledOff(LED2_PIN); }
+
+int main(void) {
+    uint32_t gSystemClock = SysCtlClockFreqSet(
+        SYSCTL_XTAL_25MHZ | SYSCTL_OSC_MAIN | SYSCTL_USE_PLL | SYSCTL_CFG_VCO_480,
+        120000000);
+
+    // LEDs
+    SysCtlPeripheralEnable(SYSCTL_PERIPH_GPION);
+    while(!SysCtlPeripheralReady(SYSCTL_PERIPH_GPION));
+    GPIOPinTypeGPIOOutput(LED_PORT_BASE, LED1_PIN | LED2_PIN);
+
+    // Inicializar botón después del clock
+    btn.begin();
+    btn.setTickIntervalMs(20); // periodo lógico (si no usas un temporizador real)
+    btn.setDebounceMs(50);
+    btn.setClickMs(400);
+    btn.setPressMs(800);
+
+    // Registrar callbacks
+    btn.attachPress(onPress);
+    btn.attachClick(onClick);
+    btn.attachDoubleClick(onDoubleClick);
+    btn.attachLongPressStart(onLongPressStart);
+    btn.attachLongPressStop(onLongPressStop);
+
+    // Configurar interrupción por flanco de subida en PJ0 (USR_SW1)
+    // Nota: en la TM4C1294XL USR_SW1 normalmente es pull-up (activo-bajo),
+    // por lo que flanco de subida suele corresponder a "release".
+    GPIOIntDisable(GPIO_PORTJ_BASE, GPIO_PIN_0);
+    GPIOIntClear(GPIO_PORTJ_BASE, GPIO_PIN_0);
+    GPIOIntTypeSet(GPIO_PORTJ_BASE, GPIO_PIN_0, GPIO_RISING_EDGE);
+    GPIOIntRegister(GPIO_PORTJ_BASE, GPIOJ_Handler);
+    GPIOIntEnable(GPIO_PORTJ_BASE, GPIO_PIN_0);
+    IntEnable(INT_GPIOJ);
+    IntMasterEnable();
+
+    while(1){
+        // Recomendado: mantener tick periódico para tiempos (debounce, doble click)
+        // El ISR también llama tick() al detectar el flanco, para respuesta inmediata.
+        btn.tick();
+        SysCtlDelay(gSystemClock / 3 / 50); // ~20 ms
+    }
+}
+
+static void onButtonEdge(void) {
+    // En flanco de subida, si el botón es pull-up (activo-bajo) el nivel activo es false
+    // Llama a la FSM con el nivel lógico actual esperado en ese flanco
+    btn.tick(false);
+}
+
+static void GPIOJ_Handler(void) {
+    uint32_t status = GPIOIntStatus(GPIO_PORTJ_BASE, true);
+    GPIOIntClear(GPIO_PORTJ_BASE, status);
+    if (status & GPIO_PIN_0) {
+        onButtonEdge();
+    }
+}
