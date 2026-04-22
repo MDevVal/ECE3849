@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <cstdlib>
 
 extern "C" {
 #include "driverlib/fpu.h"
@@ -13,11 +14,13 @@ extern "C" {
 #include "FreeRTOS.h"
 #include "task.h"
 #include "semphr.h"
+#include "event_groups.h"
 }
 
 // Board drivers (provided in project includes)
 #include "button.h"
 #include "joystick.h"
+#include "buzzer.h"
 
 // App modules per lab structure
 #include "app_objects.h"
@@ -37,6 +40,10 @@ static Joystick gJoystick(JSX, JSY, JS1);
 // Config
 #define INPUT_TICK_MS   10U
 
+static TaskHandle_t render_handle;
+
+EventGroupHandle_t xGameEvents;
+
 // Prototypes
 static void configureSystemClock(void);
 static void vInputTask(void *pvParameters);
@@ -45,12 +52,12 @@ static void vRenderTask(void *pvParameters);
 
 int main(void)
 {
+    xGameEvents = xEventGroupCreate();
     IntMasterDisable();
     FPUEnable();
     FPULazyStackingEnable();
 
     configureSystemClock();
-
 
     // Init buttons and joystick
     btnPause.begin();
@@ -64,12 +71,15 @@ int main(void)
     // Optional joystick tuning
     gJoystick.setDeadzone(0.15f);
 
+    Buzzer_Init(gSysClk);
+
     IntMasterEnable();
 
     // Create tasks (priorities per lab suggestion)
     xTaskCreate(vInputTask,  "Input",  512, NULL, 2, NULL);
     xTaskCreate(vSnakeTask,  "Snake",  512, NULL, 2, NULL);
-    xTaskCreate(vRenderTask, "Render", 768, NULL, 1, NULL);
+    xTaskCreate(vRenderTask, "Render", 768, NULL, 1, &render_handle);
+    xTaskCreate(BuzzerTask,  "Buzzer", 512, NULL, 2, NULL);
 
     vTaskStartScheduler();
     while (1);
@@ -95,7 +105,11 @@ static void vInputTask(void *pvParameters)
 
         // Toggle pause on S1
         if (btnPause.wasPressed()) {
-            gameState.isRunning = !gameState.isRunning;
+            if (gameState.state == PAUSED) {
+                gameState.state = RUNNING;
+            } else if (gameState.state == RUNNING) {
+                gameState.state = PAUSED;
+            }
         }
         // Request reset on S2
         if (btnReset.wasPressed()) {
@@ -107,18 +121,26 @@ static void vInputTask(void *pvParameters)
             case JoystickDir::N:
             case JoystickDir::NE:
             case JoystickDir::NW:
-                gameState.currentDirection = UP;
+                if (gameState.currentDirection != DOWN) {
+                    gameState.currentDirection = UP;
+                }
                 break;
             case JoystickDir::S:
             case JoystickDir::SE:
             case JoystickDir::SW:
-                gameState.currentDirection = DOWN;
+                if (gameState.currentDirection != UP) {
+                    gameState.currentDirection = DOWN;
+                }
                 break;
             case JoystickDir::E:
-                gameState.currentDirection = RIGHT;
+                if (gameState.currentDirection != LEFT) {
+                    gameState.currentDirection = RIGHT;
+                }
                 break;
             case JoystickDir::W:
-                gameState.currentDirection = LEFT;
+                if (gameState.currentDirection != RIGHT) {
+                    gameState.currentDirection = LEFT;
+                }
                 break;
             case JoystickDir::Center:
             default:
@@ -139,10 +161,11 @@ static void vSnakeTask(void *pvParameters)
         if (gameState.needsReset) {
             ResetGame();
         }
-        if (gameState.isRunning) {
+        if (gameState.state) {
             moveSnake();
         }
-        vTaskDelay(pdMS_TO_TICKS(150));
+        xTaskNotifyGive(render_handle);
+        vTaskDelay(pdMS_TO_TICKS(150 - 2 * gameState.score));
     }
 }
 
@@ -155,6 +178,7 @@ static void vRenderTask(void *pvParameters)
     for(;;)
     {
         DrawGame(&gameState);
-        vTaskDelayUntil(&last, pdMS_TO_TICKS(33));
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
 }
+

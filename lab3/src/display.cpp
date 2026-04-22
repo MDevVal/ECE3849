@@ -1,8 +1,11 @@
 #include <stdint.h>
+#include <stdio.h>
 
 extern "C" {
 #include "Crystalfontz128x128_ST7735.h"
 #include "grlib/grlib.h"
+#include "FreeRTOS.h"
+#include "semphr.h"
 }
 
 #include "app_objects.h"
@@ -33,7 +36,7 @@ static inline void drawCell(uint8_t gx, uint8_t gy, uint32_t color)
     GrRectFill(&gContext, &r);
 }
 
-void DrawGame(const SnakeGameState* state)
+void DrawGame(const volatile SnakeGameState* state)
 {
     (void)state; // not used for minimal version yet
 
@@ -42,13 +45,26 @@ void DrawGame(const SnakeGameState* state)
     GrContextForegroundSet(&gContext, ClrBlack);
     GrRectFill(&gContext, &full);
 
-    // Draw snake
-    for (uint8_t i = 0; i < snakeLength; ++i) {
-        drawCell(snake[i].x, snake[i].y, i == 0 ? ClrGreen : ClrYellow);
-    }
+    while (gameState.mutex == NULL) { taskYIELD(); }
+    xSemaphoreTake(gameState.mutex, portMAX_DELAY);
+    if (gameState.state == RUNNING || gameState.state == PAUSED) {
+        // Draw snake and food
+        for (uint8_t i = 0; i < snakeLength; ++i) {
+            drawCell(snake[i].x, snake[i].y, i == 0 ? ClrGreen : ClrYellow);
+        }
+        drawCell(gameState.gFood.x, gameState.gFood.y, ClrWhite);
+    } else if (gameState.state == GAMEOVER) {
+        GrContextForegroundSet(&gContext, ClrBlack);
+        GrRectFill(&gContext, &full);
 
-#ifdef GrFlush
+        char string_buf[128];
+        snprintf(string_buf, sizeof(string_buf), "GAME OVER - SCORE: %d", gameState.score);
+        GrContextForegroundSet(&gContext, ClrWhite);
+        GrStringDrawCentered(&gContext, (const char*)&string_buf, -1, 128/2, 128/2, true);
+    }
+    xSemaphoreGive(gameState.mutex);
+
+
     GrFlush(&gContext);
-#endif
 }
 

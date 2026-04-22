@@ -7,4 +7,4 @@ struct SnakeGameState;
 void LCD_Init(void);
 
 // Draw the full game frame: for now just background and snake.
-void DrawGame(const SnakeGameState* state);
+void DrawGame(const volatile SnakeGameState* state);

@@ -1,12 +1,11 @@
 # ECE3849 Makefile for TM4C1294 (Tiva C Series)
-# Migrated from build.sh
 
 # Project settings
-TARGET     := lab0
+TARGET     := lab3
 BUILD_DIR  := build
 
 # Serial monitor settings
-DEVICE     ?= /dev/ttyACM0
+DEVICE     ?= /dev/ttyACM2
 BAUD       ?= 115200
 
 # Toolchain paths
@@ -85,23 +84,11 @@ LIBS := \
 	-llibc.a
 
 # Source files
-APP_SOURCES := \
-	$(SRC_DIR)/main.cpp \
-	$(SRC_DIR)/buzzer.cpp \
-	$(SRC_DIR)/stopwatch.cpp \
-	$(SRC_DIR)/joystick_nav.cpp \
-	$(SRC_DIR)/screen_mic.cpp \
-	$(SRC_DIR)/startup_ccs.c
-
-LIB_SOURCES := \
+C_SOURCES := \
+	$(SRC_DIR)/startup_ccs.c \
 	$(LIBS_DIR)/pll/sysctl_pll.c \
 	$(LIBS_DIR)/display/HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.c \
 	$(LIBS_DIR)/display/Crystalfontz128x128_ST7735.c \
-	$(LIBS_DIR)/timerLib/timerLib.cpp \
-	$(LIBS_DIR)/buttonsDriver/button.cpp \
-	$(LIBS_DIR)/joystickDriver/joystick.cpp
-
-FREERTOS_SOURCES := \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/tasks.c \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/queue.c \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/list.c \
@@ -111,34 +98,28 @@ FREERTOS_SOURCES := \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F/port.c \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/portable/MemMang/heap_4.c
 
-FREERTOS_ASM := \
+CPP_SOURCES := \
+	$(SRC_DIR)/main.cpp \
+	$(SRC_DIR)/display.cpp \
+	$(SRC_DIR)/game.cpp \
+	$(SRC_DIR)/buzzer.cpp \
+	$(LIBS_DIR)/timerLib/timerLib.cpp \
+	$(LIBS_DIR)/buttonsDriver/button.cpp \
+	$(LIBS_DIR)/joystickDriver/joystick.cpp
+
+ASM_SOURCES := \
 	$(LIBS_DIR)/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F/portasm.asm
 
-ALL_SOURCES := $(APP_SOURCES) $(LIB_SOURCES) $(FREERTOS_SOURCES)
-
-# Object files - map sources to build directory with flat structure
+# Derive object files from source basenames
 OBJECTS := \
-	$(BUILD_DIR)/main.obj \
-	$(BUILD_DIR)/buzzer.obj \
-	$(BUILD_DIR)/stopwatch.obj \
-	$(BUILD_DIR)/joystick_nav.obj \
-	$(BUILD_DIR)/screen_mic.obj \
-	$(BUILD_DIR)/startup_ccs.obj \
-	$(BUILD_DIR)/sysctl_pll.obj \
-	$(BUILD_DIR)/HAL_display.obj \
-	$(BUILD_DIR)/Crystalfontz.obj \
-	$(BUILD_DIR)/timerLib.obj \
-	$(BUILD_DIR)/button.obj \
-	$(BUILD_DIR)/joystick.obj \
-	$(BUILD_DIR)/freertos_tasks.obj \
-	$(BUILD_DIR)/freertos_queue.obj \
-	$(BUILD_DIR)/freertos_list.obj \
-	$(BUILD_DIR)/freertos_timers.obj \
-	$(BUILD_DIR)/freertos_event_groups.obj \
-	$(BUILD_DIR)/freertos_stream_buffer.obj \
-	$(BUILD_DIR)/freertos_port.obj \
-	$(BUILD_DIR)/freertos_heap.obj \
-	$(BUILD_DIR)/freertos_portasm.obj
+	$(patsubst %.c,$(BUILD_DIR)/%.obj,$(notdir $(C_SOURCES))) \
+	$(patsubst %.cpp,$(BUILD_DIR)/%.obj,$(notdir $(CPP_SOURCES))) \
+	$(patsubst %.asm,$(BUILD_DIR)/%.obj,$(notdir $(ASM_SOURCES)))
+
+# vpath: tell make where to find sources by extension
+vpath %.c   $(sort $(dir $(C_SOURCES)))
+vpath %.cpp $(sort $(dir $(CPP_SOURCES)))
+vpath %.asm $(sort $(dir $(ASM_SOURCES)))
 
 # Linker script
 LINKER_SCRIPT := $(LINKER_DIR)/tm4c1294.cmd
@@ -173,108 +154,31 @@ check-toolchain:
 # Binary creation
 $(BIN): $(ELF)
 	@echo "Creating binary..."
-	@if command -v nix-shell >/dev/null 2>&1; then \
-		nix-shell -p gcc-arm-embedded --run "arm-none-eabi-objcopy -O binary '$<' '$@'"; \
-	elif command -v arm-none-eabi-objcopy >/dev/null 2>&1; then \
-		arm-none-eabi-objcopy -O binary "$<" "$@"; \
+	@if command -v arm-none-eabi-objcopy >/dev/null 2>&1; then \
+		arm-none-eabi-objcopy -O binary $< $@; \
 	else \
-		echo "Warning: Could not create .bin file (no objcopy found)"; \
-		echo "The .out file can still be used with some debuggers"; \
+		nix-shell -p gcc-arm-embedded --run "arm-none-eabi-objcopy -O binary '$<' '$@'"; \
 	fi
 	@echo ""
 	@echo "Build complete!"
-	@ls -lh $(ELF) $(BIN) 2>/dev/null || ls -lh $(ELF)
+	@ls -lh $(ELF) $(BIN)
 
 # Linking
 $(ELF): $(OBJECTS) $(LINKER_SCRIPT) | check-toolchain
 	@echo "Linking..."
 	$(CC) $(LDFLAGS) -o $@ $(OBJECTS) $(LINKER_SCRIPT) $(LIBS)
 
-# Application source compilation rules
-$(BUILD_DIR)/main.obj: $(SRC_DIR)/main.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling main.cpp..."
+# Pattern rules
+$(BUILD_DIR)/%.obj: %.c | $(BUILD_DIR) check-toolchain
+	@echo "Compiling $<..."
 	$(CC) $(CFLAGS) -c $< --output_file=$@
 
-$(BUILD_DIR)/buzzer.obj: $(SRC_DIR)/buzzer.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling buzzer.cpp..."
+$(BUILD_DIR)/%.obj: %.cpp | $(BUILD_DIR) check-toolchain
+	@echo "Compiling $<..."
 	$(CC) $(CFLAGS) -c $< --output_file=$@
 
-$(BUILD_DIR)/stopwatch.obj: $(SRC_DIR)/stopwatch.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling stopwatch.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/joystick_nav.obj: $(SRC_DIR)/joystick_nav.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling joystick_nav.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/screen_mic.obj: $(SRC_DIR)/screen_mic.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling screen_mic.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/startup_ccs.obj: $(SRC_DIR)/startup_ccs.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling startup_ccs.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-# Library compilation rules
-$(BUILD_DIR)/sysctl_pll.obj: $(LIBS_DIR)/pll/sysctl_pll.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling sysctl_pll.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/HAL_display.obj: $(LIBS_DIR)/display/HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling HAL_EK_TM4C1294XL_Crystalfontz128x128_ST7735.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/Crystalfontz.obj: $(LIBS_DIR)/display/Crystalfontz128x128_ST7735.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling Crystalfontz128x128_ST7735.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/timerLib.obj: $(LIBS_DIR)/timerLib/timerLib.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling timerLib.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/button.obj: $(LIBS_DIR)/buttonsDriver/button.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling button.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/joystick.obj: $(LIBS_DIR)/joystickDriver/joystick.cpp | $(BUILD_DIR) check-toolchain
-	@echo "Compiling joystick.cpp..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-# FreeRTOS compilation rules
-$(BUILD_DIR)/freertos_tasks.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/tasks.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling tasks.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_queue.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/queue.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling queue.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_list.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/list.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling list.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_timers.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/timers.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling timers.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_event_groups.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/event_groups.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling event_groups.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_stream_buffer.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/stream_buffer.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling stream_buffer.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_port.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/portable/CCS/ARM_CM4F/port.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling port.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_heap.obj: $(LIBS_DIR)/FreeRTOS/FreeRTOS/portable/MemMang/heap_4.c | $(BUILD_DIR) check-toolchain
-	@echo "Compiling heap_4.c..."
-	$(CC) $(CFLAGS) -c $< --output_file=$@
-
-$(BUILD_DIR)/freertos_portasm.obj: $(FREERTOS_ASM) | $(BUILD_DIR) check-toolchain
-	@echo "Compiling portasm.asm..."
+$(BUILD_DIR)/%.obj: %.asm | $(BUILD_DIR) check-toolchain
+	@echo "Compiling $<..."
 	$(CC) $(CFLAGS) -c $< --output_file=$@
 
 # Clean target
@@ -295,25 +199,13 @@ info:
 	@echo "Compiler:  $(CC)"
 	@echo "TivaWare:  $(TIVA)"
 	@echo "Build dir: $(BUILD_DIR)"
-	@echo "Sources:   $(words $(ALL_SOURCES)) C/C++ files + 1 ASM file"
-
-# Upload to board using TI DSLite
-DSLITE     := $(CCS)/ccs_base/DebugServer/bin/DSLite
-CCXML      := $(CCS)/ccs_base/common/targetdb/connections/TIXDS110_Connection.ccxml
+	@echo "Sources:   $(words $(C_SOURCES) $(CPP_SOURCES)) C/C++ files + $(words $(ASM_SOURCES)) ASM file(s)"
+	@echo "Objects:   $(OBJECTS)"
 
 .PHONY: upload
-upload: $(ELF)
+upload: $(BIN)
 	@echo "Uploading to TM4C1294..."
-	@if [ -f "$(DSLITE)" ]; then \
-		$(DSLITE) load -c $(CCXML) -f $(ELF); \
-	elif command -v lm4flash >/dev/null 2>&1; then \
-		lm4flash $(BIN); \
-	elif command -v nix-shell >/dev/null 2>&1; then \
-		nix-shell -p lm4tools --run "lm4flash $(BIN)"; \
-	else \
-		echo "Error: No flash tool found (DSLite or lm4flash)"; \
-		exit 1; \
-	fi
+	sudo lm4flash $(BIN)
 
 # Serial monitor
 .PHONY: monitor
@@ -333,7 +225,7 @@ monitor:
 		ls -la /dev/ttyACM* /dev/ttyUSB* 2>/dev/null || echo "  None found"; \
 		echo ""; \
 		echo "Make sure the board is connected and you have permissions:"; \
-		echo "  sudo usermod -a -G dialout \$$USER"; \
+		echo "  sudo usermod -a -G dialout $$USER"; \
 		exit 1; \
 	fi; \
 	echo "Connecting to $$DEVICE_TO_USE at $(BAUD) baud..."; \

@@ -6,6 +6,7 @@
 extern "C" {
 #include "FreeRTOS.h"
 #include "grlib/grlib.h"
+#include "event_groups.h"
 }
 
 #include <stdint.h>
@@ -17,4 +18,4 @@ extern tContext gContext;
 extern uint32_t gSysClk;
 
 // Add your synchronization primitives here as you build the lab
-
+extern EventGroupHandle_t xGameEvents;
